@@ -1818,9 +1818,9 @@ async function cmdAttach(opts, [ref, terminal]) {
   if (terminal.startsWith("-")) throw new CliError(`"${terminal}" isn't a terminal; name one like t7.`, 2);
   const project = await projectFor(opts);
   const { file, key } = project;
+  const at = await terminalPlace(terminal, project);
   const bot = findBot(file, ref);
   if (bot.planned) throw new CliError(`${bot.name} is planned (wave ${bot.planned.wave}); clear "planned" before attaching it.`);
-  const at = await terminalPlace(terminal, project);
   const get = await hcGet(at.address);
   if (!get || get.state !== "live") throw new CliError(`${at.address} isn't a live terminal.`);
   const address = get.address ?? at.address;
