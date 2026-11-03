@@ -539,7 +539,7 @@ test("attach refuses another bot's pane and a pane that isn't live; a planned bo
   assert.match(s.cli(["attach", "Genie", "t4"]).err, /t4 already plays Captain \(b-bbbbbbbbbb\)/);
   assert.match(s.cli(["attach", "Genie", "t5"]).err, /t5 isn't a live terminal/);
   assert.match(s.cli(["attach", "Studio", "t4"]).err, /Studio is planned/);
-  assert.match(s.cli(["attach", "Genie", "vps/t4"]).err, /this computer's panes only/);
+  assert.match(s.cli(["attach", "Genie", "vps/t4"]).err, /vps\/t4 is on vps; name the bot's project there: --machine vps/);
   assert.deepEqual(labelCalls(s.calls()), []);
 });
 
