@@ -556,7 +556,7 @@ export function attachView() {
     const { byKey } = foldAttach(rows);
     const { live, ended, unknown } = await confirmBindings([...byKey.values()], core, lookup, UNANSWERED, machines);
     if (ended.length) await sweep(path, ended);
-    // byTerminal: by hc address ("g10/t8" for a linked machine's); unknown: a machine's rows
+    // byTerminal: by hc address ("lab/t8" for a linked machine's); unknown: a machine's rows
     // whose machine isn't connected (as saved: neither live nor ended).
     return { core, path, machines, live: new Map(live.map((l) => [l.binding.bot, l])),
       byTerminal: new Map(live.map((l) => [addressOf(l.binding, machines), l])), unknown: new Map(unknown.map((b) => [b.bot, b])) };

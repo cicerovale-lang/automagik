@@ -257,7 +257,7 @@ test("with no CLI under the app home, Start and Attach say so and nothing runs",
   assert.equal(await liveTerminalOf(ID.main), null);
 });
 
-test("hc's keep wrapper: the program it runs is in front (g10/t8's hermes --tui); once it exits, the shell", () => {
+test("hc's keep wrapper: the program it runs is in front (lab/t8's hermes --tui); once it exits, the shell", () => {
   const kept = ["sh", "-c", "\"$@\"; exec \"${SHELL:-sh}\" -i", "sh", "hermes", "--tui"];
   assert.deepEqual(unwrapKeep(kept), ["hermes", "--tui"]);
   assert.equal(agentInForeground({ foreground: { argv: kept, name: "sh" } }), true);

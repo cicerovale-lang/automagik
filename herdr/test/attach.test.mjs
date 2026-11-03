@@ -324,25 +324,25 @@ test("a torn line in the ledger is skipped; the rows around it still count", (t)
 
 // ---- automagik#206: a linked machine's rows ----
 
-const G10 = "320f9763fb83aebfc13415d44d4930c7";
-const remoteRow = (extra = {}) => attachRow({ event: "attach", bot: "b-atlasaaaaa", project: "/home/felipe/atlas-incident/ws",
-  terminal: "t8", core: G10, created_ms: 1793316831846, machine: "g10", by: "attach", at: 0, ...extra });
+const LAB = "320f9763fb83aebfc13415d44d4930c7";
+const remoteRow = (extra = {}) => attachRow({ event: "attach", bot: "b-atlasaaaaa", project: "/home/me/incident/ws",
+  terminal: "t8", core: LAB, created_ms: 1793316831846, machine: "lab", by: "attach", at: 0, ...extra });
 
 test("a linked machine's row: bare terminal, the machine's core, read and folded like a local one", () => {
   const row = remoteRow();
   assert.equal(row.terminal, "t8");
-  assert.equal(row.machine, "g10");
+  assert.equal(row.machine, "lab");
   const { rows, skipped } = readAttach(`${JSON.stringify(row)}\n`);
   assert.equal(skipped, 0);
   assert.equal(foldAttach(rows).byBot.get("b-atlasaaaaa").terminal, "t8");
 });
 
 test("machinesById and addressOf: the address uses the name hc gives that core now", () => {
-  const machines = machinesById(JSON.stringify({ machines: [{ id: G10, name: "g10", state: "connected" }, { id: "x", name: "bad/name", state: "connected" }, { name: "noid" }] }));
-  assert.deepEqual([...machines], [[G10, { name: "g10", connected: true }]]);
-  assert.equal(addressOf(remoteRow(), machines), "g10/t8");
-  assert.equal(addressOf(remoteRow(), machinesById({ machines: [{ id: G10, name: "nebula", state: "connected" }] })), "nebula/t8", "renamed");
-  assert.equal(addressOf(remoteRow(), new Map()), "g10/t8", "unlinked: the row's own name");
+  const machines = machinesById(JSON.stringify({ machines: [{ id: LAB, name: "lab", state: "connected" }, { id: "x", name: "bad/name", state: "connected" }, { name: "noid" }] }));
+  assert.deepEqual([...machines], [[LAB, { name: "lab", connected: true }]]);
+  assert.equal(addressOf(remoteRow(), machines), "lab/t8");
+  assert.equal(addressOf(remoteRow(), machinesById({ machines: [{ id: LAB, name: "nebula", state: "connected" }] })), "nebula/t8", "renamed");
+  assert.equal(addressOf(remoteRow(), new Map()), "lab/t8", "unlinked: the row's own name");
   assert.equal(addressOf({ terminal: "t3", machine: null }), "t3");
   assert.deepEqual([...machinesById("not json")], []);
 });
@@ -350,12 +350,12 @@ test("machinesById and addressOf: the address uses the name hc gives that core n
 test("confirmBindings: a connected machine's row is asked at its address; away or unlinked stays unknown, never asked", async () => {
   const asked = [];
   const ask = async (args) => { asked.push(args); return { state: "live", created_ms: 1793316831846 }; };
-  const connected = machinesById({ machines: [{ id: G10, name: "g10", state: "connected" }] });
+  const connected = machinesById({ machines: [{ id: LAB, name: "lab", state: "connected" }] });
   const on = await confirmBindings([remoteRow()], "mac", ask, undefined, connected);
   assert.equal(on.live.length, 1);
-  assert.deepEqual(asked, [["get", "g10/t8"]]);
+  assert.deepEqual(asked, [["get", "lab/t8"]]);
   asked.length = 0;
-  const away = await confirmBindings([remoteRow()], "mac", ask, undefined, machinesById({ machines: [{ id: G10, name: "g10", state: "disconnected" }] }));
+  const away = await confirmBindings([remoteRow()], "mac", ask, undefined, machinesById({ machines: [{ id: LAB, name: "lab", state: "disconnected" }] }));
   const unlinked = await confirmBindings([remoteRow()], "mac", ask);
   for (const r of [away, unlinked]) assert.deepEqual([r.live.length, r.ended.length, r.unknown.length], [0, 0, 1]);
   assert.deepEqual(asked, [], "a machine away is never asked");

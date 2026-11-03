@@ -15,9 +15,9 @@
 // never "<name>/tN"), and `core` is that machine's own core id (hc machine ls `id`, the same as
 // its hc server status core.id), so a rename there keeps the row. Its hc address is
 // "<machine>/<terminal>" (addressOf), the machine named as hc names it now. For example:
-//   {"v":1,"event":"attach","bot":"b-atlasaaaaa","project":"/home/felipe/atlas-incident/ws",
+//   {"v":1,"event":"attach","bot":"b-atlasaaaaa","project":"/home/me/incident/ws",
 //    "terminal":"t8","core":"320f9763fb83aebfc13415d44d4930c7","created_ms":1793316831846,
-//    "machine":"g10","at":"2026-11-03T21:00:00.000Z","by":"attach"}
+//    "machine":"lab","at":"2026-11-03T21:00:00.000Z","by":"attach"}
 //
 // The fold (foldAttach), over the rows in file order, keyed by (core, terminal, created_ms):
 //   attach: ends any earlier binding of the same bot and any binding of the same key, then

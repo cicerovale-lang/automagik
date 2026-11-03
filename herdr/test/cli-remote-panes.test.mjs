@@ -1,6 +1,6 @@
 // automagik-herdr's pane commands on a linked machine (automagik#206 part b): start, attach,
 // detach, restart and whois with --machine, against fake-hc's linked machine "vm" (a scratch
-// home; its terminals are "vm/tN"). Shaped on the Atlas bot on g10: a Hermes pane under hc's
+// home; its terminals are "vm/tN"). Shaped on the Atlas bot on lab: a Hermes pane under hc's
 // keep wrapper, reporting no status. The ledger rows keep the bare terminal, `machine` and that
 // machine's core id (bots.attach-ledger@1); whois keeps its shape (bots.whois-json@1). No call
 // ever sends a pane keys. The real hc and window are never touched.
@@ -59,7 +59,7 @@ function scene(t, { terminals = [], tui = true } = {}) {
   return { root, project, app, home, cli, on, calls, hcState, setState, rows };
 }
 
-// The Atlas pane as g10/t8 is: live, under the keep wrapper, no status reported.
+// The Atlas pane as lab/t8 is: live, under the keep wrapper, no status reported.
 const atlasPane = (extra = {}) => ({ address: "vm/t8", name: null, state: "live", created_ms: 1793316831846, parent: null, labels: {},
   foreground: { argv: KEEP, name: "sh" }, status: null, ...extra });
 const keysSent = (calls) => calls.filter((c) => ["send", "keys", "interrupt"].includes(c[0]));
