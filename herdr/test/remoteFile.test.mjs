@@ -4,12 +4,12 @@
 // 4 machine_unknown, errors as JSON on stderr). Never the real hc.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { REMOTE_TEXT_MAX, RemoteFileError, StaleSnapshot, readRemoteText, removeRemoteText, writeRemoteText } from "../mods/am-sidebar/remoteFile.js";
+import { REMOTE_TEXT_MAX, RemoteFileError, StaleSnapshot, readRemoteText, removeRemoteText, utf8Length, writeRemoteText } from "../mods/am-sidebar/remoteFile.js";
 
 const fail = (code, kind, message) => ({ code, stdout: "", stderr: `${JSON.stringify({ error: { kind, message, hint: "h" } })}\n` });
 
@@ -119,7 +119,7 @@ test("replace: lands only while the file holds the text read; a change, a remova
 test("replace: an empty file and text past the cap are refused before anything is sent", async (t) => {
   const io = fakeIo();
   await assert.rejects(writeRemoteText(io, "vm", "/x/bots.json", "y", ""), (e) => e.kind === "empty");
-  await assert.rejects(writeRemoteText(io, "vm", "/x/bots.json", "y".repeat(REMOTE_TEXT_MAX), "z"), (e) => e.kind === "too_large");
+  await assert.rejects(writeRemoteText(io, "vm", "/x/bots.json", "y".repeat(REMOTE_TEXT_MAX + 1), "z"), (e) => e.kind === "too_large");
   assert.equal(io.calls.length, 0);
   await assert.rejects(writeRemoteText(io, "vm", "/x/bots.json", "y"), /pass the text the edit started from/);
 });
@@ -134,4 +134,58 @@ test("remove: only while the file holds the text read, trailing newlines include
   await removeRemoteText(io, "vm", path, "keep\n\n");
   assert.equal(existsSync(path), false);
   await assert.rejects(removeRemoteText(io, "vm", path, "keep\n\n"), StaleSnapshot);
+});
+
+// An answer lost after the call went out: `land` runs the real call or not, then hc's timeout.
+const lost = (io, land) => ({
+  hc: async (args) => { if (land) await io.hc(args); return { code: 1, stdout: "", stderr: "hc: timed out waiting for vm" }; },
+  exec: async (command, args, machine) => { if (land) await io.exec(command, args, machine); return { code: -1, stdout: "", stderr: "timed out after 60 s" }; },
+  read: io,
+});
+const withRead = (l, io) => ({ hc: async (args) => (args[1] === "read" ? io.hc(args) : l.hc(args)), exec: l.exec });
+
+test("an edit or create that landed but lost its answer is a success (a retry never adds a bot twice)", async (t) => {
+  const root = scratch(t);
+  const path = join(root, "bots.json");
+  const io = fakeIo();
+  await writeRemoteText(withRead(lost(io, true), io), "vm", path, "made\n", null);
+  assert.equal(readFileSync(path, "utf8"), "made\n");
+  await writeRemoteText(withRead(lost(io, true), io), "vm", path, "edited\n", "made\n");
+  assert.equal(readFileSync(path, "utf8"), "edited\n");
+});
+
+test("an edit or create whose answer was lost and that didn't land: State unknown, check before retrying", async (t) => {
+  const root = scratch(t);
+  const path = join(root, "bots.json");
+  const io = fakeIo();
+  await assert.rejects(writeRemoteText(withRead(lost(io, false), io), "vm", path, "made\n", null),
+    (e) => e.kind === "unknown_state" && /^State unknown: .*check .*bots\.json on vm before trying again/.test(e.message));
+  writeFileSync(path, "old\n");
+  await assert.rejects(writeRemoteText(withRead(lost(io, false), io), "vm", path, "new\n", "old\n"), (e) => e.kind === "unknown_state");
+  // A refusal before anything was written stays a plain failure, never "unknown".
+  await assert.rejects(writeRemoteText(fakeIo({ down: true }), "vm", path, "new\n", "old\n"), (e) => e.kind === "unavailable");
+});
+
+test("create: a folder it can't write leaves no file and is a failure, not stale", async (t) => {
+  const root = scratch(t);
+  const dir = join(root, "ro");
+  execFileSync("mkdir", ["-p", dir]);
+  execFileSync("chmod", ["555", dir]);
+  t.after(() => { try { execFileSync("chmod", ["755", dir]); } catch { /* removed already */ } });
+  await assert.rejects(writeRemoteText(fakeIo(), "vm", join(dir, "bots.json"), "x\n", null), (e) => !(e instanceof StaleSnapshot) && e.kind !== "unknown_state");
+  assert.equal(existsSync(join(dir, "bots.json")), false);
+});
+
+test("read: herdr-core's io error is a failure, never 'no file'", async () => {
+  const io = { hc: async () => ({ code: 1, stdout: "", stderr: JSON.stringify({ error: { kind: "io", message: "permission denied" } }) }) };
+  await assert.rejects(readRemoteText(io, "vm", "/x/bots.json"), (e) => e instanceof RemoteFileError && e.kind === "io" && /permission denied/.test(e.message));
+});
+
+test("the cap is per argument in UTF-8 bytes: multibyte text under the character count is still refused", async () => {
+  assert.equal(utf8Length("aé€😀"), 1 + 2 + 3 + 4);
+  const io = fakeIo();
+  const wide = "€".repeat(Math.ceil(REMOTE_TEXT_MAX / 3) + 1); // fewer characters than the cap, more bytes
+  assert.ok(wide.length < REMOTE_TEXT_MAX);
+  await assert.rejects(writeRemoteText(io, "vm", "/x/bots.json", wide, null), (e) => e.kind === "too_large" && /make the file smaller/.test(e.message));
+  assert.equal(io.calls.length, 0);
 });

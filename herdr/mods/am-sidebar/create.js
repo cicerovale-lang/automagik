@@ -46,7 +46,8 @@ function icon(p, size, color) {
 // Which Restart a busy menu runs (the item whose label says "Restarting…").
 const restartKey = ({ agent = null, force = false, fresh = false } = {}) => (agent ? "restart-on" : force ? "restart-force" : fresh ? "restart-fresh" : "restart");
 
-const notSaved = (why) => (/^Not saved:/.test(String(why)) ? String(why) : `Not saved: ${why}`);
+// A linked machine's write whose answer was lost says "State unknown:" itself (remoteFile.js).
+const notSaved = (why) => (/^(Not saved|State unknown):/.test(String(why)) ? String(why) : `Not saved: ${why}`);
 
 // The form's text fields, read into the plain state formModel works on.
 const TEXT = ["name", "role", "note", "catTitle", "catSub"];

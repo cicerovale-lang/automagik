@@ -194,8 +194,15 @@ export async function remoteKeyOf(opts) {
   const there = await remoteIo.exec("test", ["-d", dir], machine);
   if (there.code === -1) throw new CliError(`${machine} can't be reached: ${hcSaid(there.stderr)}`);
   if (there.code !== 0) throw new CliError(`--project: ${dir} is not a folder on ${machine}.`, 2);
-  const gitThere = async (args, cwd) => { const r = await remoteIo.exec("git", args, machine, { cwd }); return r.code === 0 ? r.stdout : null; };
-  const existsThere = async (path) => (await remoteIo.exec("test", ["-e", path], machine)).code === 0;
+  // A call that got no answer (code -1: hc failed, a timeout) means the machine is away, never
+  // "not in git" or "not there".
+  const ask = async (command, args, cwd) => {
+    const r = await remoteIo.exec(command, args, machine, { cwd });
+    if (r.code === -1) throw new CliError(`${machine} can't be reached: ${hcSaid(r.stderr)}`);
+    return r;
+  };
+  const gitThere = async (args, cwd) => { const r = await ask("git", args, cwd); return r.code === 0 ? r.stdout : null; };
+  const existsThere = async (path) => (await ask("test", ["-e", path])).code === 0;
   return (await projectOf(dir, gitThere, existsThere)).own;
 }
 
@@ -227,6 +234,8 @@ async function writeRemoteBots(project, raw) {
     else await writeRemoteText(remoteIo, machine, path, `${JSON.stringify(raw, null, 2)}\n`, expected);
   } catch (e) {
     if (e instanceof StaleSnapshot) throw new CliError(`Not saved: ${fileName(project)} changed since it was read (another edit landed first). Run the command again.`);
+    // A write whose answer was lost and that the file doesn't show: said as it is.
+    if (e instanceof RemoteFileError && e.kind === "unknown_state") throw new CliError(e.message);
     if (e instanceof RemoteFileError) throw new CliError(`Not saved: ${e.message}`);
     throw e;
   }

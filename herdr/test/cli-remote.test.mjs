@@ -154,3 +154,33 @@ test("--machine on a machine that isn't connected: a failure that says so, nothi
   assert.doesNotMatch(r.err, /changed since/);
   assert.equal(readFileSync(s.botsPath, "utf8"), before);
 });
+
+test("--machine: an edit that landed there but lost its answer is reported saved, once", (t) => {
+  const s = scene(t);
+  assert.equal(s.cli(["create", ...s.on, "--name", "Hedge", "--agent", "claude"]).code, 0);
+  s.setState((st) => { st.loseEditAnswer = true; });
+  const r = s.cli(["create", ...s.on, "--name", "Trader", "--agent", "claude"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(s.bots().bots.map((b) => b.name), ["Hedge", "Trader"], "one Trader, no retry needed");
+});
+
+test("--machine: a project folder with spaces and a quote goes through as it is", (t) => {
+  const s = scene(t);
+  const odd = join(s.root, "vm", "hedge fund's \"desk\"");
+  mkdirSync(odd);
+  const r = s.cli(["create", "--machine", "vm", "--project", odd, "--name", "Hedge", "--agent", "claude", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json().project, odd);
+  assert.equal(JSON.parse(readFileSync(join(odd, ".herdr/bots.json"), "utf8")).bots[0].name, "Hedge");
+  assert.equal(s.cli(["edit", "Hedge", "--machine", "vm", "--project", odd, "--role", "trades"]).code, 0);
+  assert.equal(JSON.parse(readFileSync(join(odd, ".herdr/bots.json"), "utf8")).bots[0].role, "trades");
+});
+
+test("--machine: git there getting no answer is 'can't be reached', never 'not in git'", (t) => {
+  const s = scene(t);
+  s.setState((st) => { st.execUnanswered = ["git"]; });
+  const r = s.cli(["create", ...s.on, "--name", "Hedge", "--agent", "claude"]);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /vm can't be reached: vm stopped answering/);
+  assert.equal(existsSync(s.botsPath), false);
+});

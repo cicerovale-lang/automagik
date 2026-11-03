@@ -148,6 +148,8 @@ switch (words[0]) {
     if (!m) fail(JSON.stringify({ error: { kind: "not_found", message: `no machine "${on}"` } }), 3);
     if (m.state !== "connected") fail(`hc: ${on} is not connected`);
     const b64 = (s) => Buffer.from(s ?? "").toString("base64");
+    // state.execUnanswered: programs whose call gets no answer (the machine dropped mid-call).
+    if ((state.execUnanswered ?? []).includes(argv[0])) fail(JSON.stringify({ error: { kind: "unavailable", message: `${on} stopped answering` } }));
     if (argv[0] === "uname") { out({ code: 0, stdout: b64(`${m.uname}\n`), stderr: "", timed_out: false }); break; }
     const r = spawnSync(argv[0], argv.slice(1), { cwd: cwd ?? m.home, encoding: "utf8",
       env: { ...process.env, HOME: m.home, PATH: `${m.path ? `${m.path}:` : ""}/usr/bin:/bin:/usr/sbin:/sbin` } });
@@ -177,6 +179,8 @@ switch (words[0]) {
     const at = current.indexOf(old);
     if (at < 0 || current.indexOf(old, at + 1) >= 0) err(1, "edit_failed", "the old text is not in the file");
     writeFileSync(path, current.slice(0, at) + now + current.slice(at + old.length));
+    // state.loseEditAnswer: the edit lands, then the answer is lost (a timeout).
+    if (state.loseEditAnswer) { delete state.loseEditAnswer; save(); fail("hc: timed out waiting for the machine"); }
     out({ bytes: now.length, path });
     break;
   }
