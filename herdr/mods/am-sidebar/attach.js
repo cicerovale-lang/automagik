@@ -10,6 +10,15 @@
 //     created_ms: <the terminal's hc created_ms>, machine: null | "<name>", at: "<ISO time>",
 //     by: "start" | "attach" | "detach" | "sweep" | "import", reason?: "finished" | "moved" | "replaced" }
 //
+// `machine` (automagik#206, bots.attach-ledger@1): null, the pane runs on this computer; a name,
+// it runs on that linked machine (hc machine ls), `terminal` is still its bare id there ("tN",
+// never "<name>/tN"), and `core` is that machine's own core id (hc machine ls `id`, the same as
+// its hc server status core.id), so a rename there keeps the row. Its hc address is
+// "<machine>/<terminal>" (addressOf), the machine named as hc names it now. For example:
+//   {"v":1,"event":"attach","bot":"b-atlasaaaaa","project":"/home/felipe/atlas-incident/ws",
+//    "terminal":"t8","core":"320f9763fb83aebfc13415d44d4930c7","created_ms":1793316831846,
+//    "machine":"g10","at":"2026-11-03T21:00:00.000Z","by":"attach"}
+//
 // The fold (foldAttach), over the rows in file order, keyed by (core, terminal, created_ms):
 //   attach: ends any earlier binding of the same bot and any binding of the same key, then
 //           binds the key to the row's bot;
@@ -17,7 +26,9 @@
 //   end:    unbinds the key, whatever bot it held.
 // What is left binds each bot to at most one key and each key to at most one bot. A binding
 // is an attachment only once hc confirms it (confirmBindings): the core is this computer's
-// (`hc server status` core.id), and `hc get <terminal>` is live with the same created_ms. A
+// (`hc server status` core.id), or a linked machine's that is connected now, and `hc get
+// <address>` is live with the same created_ms. A machine's row whose machine isn't linked or
+// isn't connected stays as it is (unknown: shown as last seen, never ended for it). A
 // finished or vanished terminal reads as ended ("finished"), and a terminal id reused after
 // an hc restart, a new created_ms, as ended too ("replaced"), before any end row is written.
 
@@ -110,21 +121,50 @@ export function foldAttach(rows) {
 }
 
 /**
+ * The linked machines by core id, from `hc machine ls --json` (its text or parsed answer):
+ * Map id -> { name, connected }. Anything unreadable: none.
+ */
+export function machinesById(json) {
+  let list = [];
+  try { list = (typeof json === "string" ? JSON.parse(json) : json)?.machines ?? []; } catch { return new Map(); }
+  const out = new Map();
+  for (const m of Array.isArray(list) ? list : []) {
+    if (m && typeof m.id === "string" && m.id && typeof m.name === "string" && TERMINAL_SHAPE.test(m.name)) {
+      out.set(m.id, { name: m.name, connected: m.state === "connected" });
+    }
+  }
+  return out;
+}
+
+/**
+ * A binding's hc address: its terminal on this computer; "<name>/<terminal>" on a linked
+ * machine, the name hc gives that machine's core now (`machines`, machinesById), else the
+ * row's own name. Never stored: rows keep the bare terminal.
+ */
+export function addressOf(binding, machines = new Map()) {
+  if (!binding?.machine) return binding?.terminal ?? null;
+  return `${machines.get(binding.core)?.name ?? binding.machine}/${binding.terminal}`;
+}
+
+/**
  * Checks bindings against hc. `core` is this computer's core id; `ask(args)` resolves with
  * `hc <args> --json` parsed, null when hc says there is no such terminal, or `unanswered`
  * when it gave no answer (it may also throw: a failed hc never reads as "ended").
  * Resolves { live: [{ binding, get }], ended: [{ binding, reason }], unknown: [binding] }:
- * another core's or machine's row is ended ("finished": this core no longer runs it) unless
- * `machine` is set, which this pack never writes yet; those stay unknown.
+ * another core's local row is ended ("finished": this core no longer runs it). A linked
+ * machine's row (`machine` set) is asked at its address only while its core is a linked machine
+ * that is connected (`machines`, machinesById); otherwise it stays unknown, never ended and
+ * never asked, so a machine away doesn't make hc fail every lookup.
  */
-export async function confirmBindings(bindings, core, ask, unanswered = undefined) {
+export async function confirmBindings(bindings, core, ask, unanswered = undefined, machines = new Map()) {
   const live = [];
   const ended = [];
   const unknown = [];
   await Promise.all(bindings.map(async (binding) => {
-    if (binding.machine) { unknown.push(binding); return; }
-    if (binding.core !== core) { ended.push({ binding, reason: "finished" }); return; }
-    const get = await ask(["get", binding.terminal]);
+    if (binding.machine) {
+      if (!machines.get(binding.core)?.connected) { unknown.push(binding); return; }
+    } else if (binding.core !== core) { ended.push({ binding, reason: "finished" }); return; }
+    const get = await ask(["get", addressOf(binding, machines)]);
     if (unanswered !== undefined && get === unanswered) { unknown.push(binding); return; }
     const verdict = verdictOf(binding, get);
     if (verdict === "live") live.push({ binding, get });

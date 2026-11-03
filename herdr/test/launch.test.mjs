@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { state } from "./use-stubs.mjs";
-import { hcName, parentArgs, startRefusal, startArgs, agentInForeground, isClaude, newest, attachRefusal, parseCommand } from "../mods/am-sidebar/launchArgs.js";
+import { hcName, parentArgs, startRefusal, startArgs, agentInForeground, isClaude, newest, attachRefusal, parseCommand, unwrapKeep } from "../mods/am-sidebar/launchArgs.js";
 const { startBot, attachBot, liveTerminalOf, botOfTerminal } = await import("../mods/am-sidebar/launch.js");
 
 const ID = { main: "b-aaaaaaaaaa", cap: "b-bbbbbbbbbb", dev: "b-cccccccccc", plan: "b-eeeeeeeeee" };
@@ -255,4 +255,15 @@ test("with no CLI under the app home, Start and Attach say so and nothing runs",
   const r = await startBot("/p", ID.main);
   assert.ok(r.refused, "refused");
   assert.equal(await liveTerminalOf(ID.main), null);
+});
+
+test("hc's keep wrapper: the program it runs is in front (g10/t8's hermes --tui); once it exits, the shell", () => {
+  const kept = ["sh", "-c", "\"$@\"; exec \"${SHELL:-sh}\" -i", "sh", "hermes", "--tui"];
+  assert.deepEqual(unwrapKeep(kept), ["hermes", "--tui"]);
+  assert.equal(agentInForeground({ foreground: { argv: kept, name: "sh" } }), true);
+  // After the wrapper's exec the foreground is the login shell: no agent.
+  assert.equal(agentInForeground({ foreground: { argv: ["/bin/bash", "-i"] } }), false);
+  // Any other sh -c is left as it is.
+  assert.deepEqual(unwrapKeep(["sh", "-c", "hermes --tui"]), ["sh", "-c", "hermes --tui"]);
+  assert.equal(agentInForeground({ foreground: { argv: ["sh", "-c", "echo hi"] } }), false);
 });

@@ -58,9 +58,23 @@ export function startArgs({ botId, name, cwd, space, tab, parent, argv, labels =
   return [...args, ...parent, "--", ...env, ...argv];
 }
 
-/** True when `hc get`'s foreground is a program other than a shell (an agent, by Decision 3). */
+// hc's keep wrapper (hc run --keep): the program, then a shell once it exits, as
+// `sh -c '"$@"; exec "${SHELL:-sh}" -i' sh <program> <args>…`.
+const KEEP_WRAPPER = '"$@"; exec "${SHELL:-sh}" -i';
+
+/** A foreground argv with hc's keep wrapper taken off (the program it runs), else as it is. */
+export function unwrapKeep(argv) {
+  if (!Array.isArray(argv) || argv.length < 5 || !SHELLS.has(base(argv[0])) || argv[1] !== "-c" || argv[2] !== KEEP_WRAPPER) return argv;
+  return argv.slice(4);
+}
+
+/**
+ * True when `hc get`'s foreground is a program other than a shell (an agent, by Decision 3),
+ * looking through hc's keep wrapper: once the program exits, the wrapper execs the shell, so
+ * the foreground is a shell again.
+ */
 export function agentInForeground(get) {
-  const argv0 = get?.foreground?.argv?.[0];
+  const argv0 = unwrapKeep(get?.foreground?.argv)?.[0];
   return Boolean(argv0) && !SHELLS.has(base(argv0));
 }
 
