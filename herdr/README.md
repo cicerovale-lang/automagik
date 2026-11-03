@@ -209,13 +209,17 @@ now. A planned bot's menu has no Run items. A restart refused because the bot is
 "Restart anyway". The Bots list and the Attach picker open on the bots the sidebar already
 knows and refresh behind.
 
-A project on a linked machine (`hc machine ls`) is configured from here too: its bots' menu has
-Configure and Prompt, the Bots list names the project with its machine and offers Edit, and
-New bot on a focused space of that machine creates the bot in that machine's project. The file
-is read and written on that machine through herdr-core (`hc file edit` with the text read, an
-exclusive create for a new file), so an edit made there since the form opened is refused, never
-overwritten. Start, Attach and What happened for those bots are not in the menu yet. A machine
-that isn't answering shows its bots as last seen, dimmed, and its menu says so.
+A project on a linked machine (`hc machine ls`) is managed from here too. Its bots' menu has
+Configure, Prompt and Run (Start, Focus, Restart, Attach to a focused pane of that machine,
+Detach). The Bots list names the project with its machine, and New bot on a focused space of
+that machine creates the bot in that machine's project. The file is read and written on that
+machine through herdr-core (`hc file edit` with the text read, an exclusive create for a new
+file), so an edit made there since the form opened is refused, never overwritten. Its panes run
+there (`hc run --on`, addressed `machine/tN`) and show in this window, in a space of that
+machine on the project. The command a bot starts with is built here, from Herdr's agent table
+and your `programs.json`. What happened isn't shown for those bots yet, and a Claude bot there
+starts without its per-turn briefing until automagik-herdr is installed on that machine. A
+machine that isn't answering shows its bots as last seen, dimmed, and its menu says so.
 
 On its first load the pack switches Herdr to the Automagik theme, light or dark following the
 system. Both halves are listed in Herdr's Settings, and a theme you pick later stays: the pack
@@ -262,8 +266,16 @@ automagik-herdr update [--check | --rollback]
   there by the same rule. The file is read and written there through hc by the same
   compare-and-swap rule, and the `--json` answers carry `machine`. A write whose answer is lost
   (a timeout, or the link dropping, which hc reports as `unavailable`) is read back: saved if the file holds it, else `State unknown`, so check the file
-  before trying again. One write carries at most 96 KiB. Its panes aren't tracked from
-  this computer yet (`status` is `unknown`), and the commands on panes refuse `--machine`.
+  before trying again. One write carries at most 96 KiB.
+- `start`, `restart`, `attach`, `detach` and `whois` take `--machine` too: the pane runs on that
+  machine (`attach <bot> M/tN`, or a bare `tN` with `--machine`). The attach ledger's row keeps
+  the bare `tN`, `machine` and that machine's core id. `whois --json` keeps its shape: its
+  `terminal` is the bare `tN` and `core` that machine's, never `M/tN`. While the machine isn't
+  connected, its rows stay as they were (`status` `unknown`), never ended. A pane that reports
+  no status to hc (Hermes) can't say whether it is waiting for an approval, so `restart` refuses
+  it unless `--force`. No command ever sends a pane keys: `--force` starts the new pane and ends
+  the old one only once the new one is up. `worker`, `brief`, `history` and `tidy` stay this
+  computer's.
 - A bot is named by its id or by its name. A refusal exits 1, a usage mistake (such as a
   missing `--project` folder) exits 2, and nothing is written.
 - `start` runs the bot's agent in a new pane with `hc run`, labelled `bot=<id>`, and records it

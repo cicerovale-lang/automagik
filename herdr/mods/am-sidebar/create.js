@@ -10,7 +10,8 @@
 // back its raw copy with the text it read as the snapshot, so an entry it can't show, or
 // someone's edit since, is never lost. A project on a linked machine (props.machine, or the
 // focused space's) is read there and written there through herdr-core (bots.js writeBots),
-// by the same rule; Run and Inspect stay this computer's for now (automagik#206). Apache-2.0.
+// by the same rule, and its bots start, restart, attach and detach there (the CLI's --machine);
+// What happened stays this computer's for now (automagik#206). Apache-2.0.
 
 import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Popover, Button } from "gpui-base";
@@ -331,7 +332,7 @@ export class BotForm {
         // Saved either way from here: a refused or failed Start says so, and the form
         // stops offering to create the bot a second time.
         let refused = null;
-        try { refused = (await startBot(this.key, entry.id, { sleep: sleepOf(cx) }))?.refused ?? null; } catch (e) { refused = String(e?.message ?? e); }
+        try { refused = (await startBot(this.key, entry.id, { sleep: sleepOf(cx) }, this.machine))?.refused ?? null; } catch (e) { refused = String(e?.message ?? e); }
         if (refused) {
           this.error = `Saved, not started: ${refused}`;
           this.saved = true;
@@ -351,7 +352,7 @@ export class BotForm {
     this.busy = "attach";
     this.error = null;
     cx.spawn(async (cx) => {
-      const r = await attachBot(project.key, bot.id, this.p.terminal);
+      const r = await attachBot(project.key, bot.id, this.p.terminal, project.machine ?? null);
       this.busy = false;
       if (r.refused) this.error = r.refused;
       else { run("am-sidebar.refresh"); closeOverlay(this.p.overlay); }
@@ -376,7 +377,7 @@ export class BotForm {
     this.busy = "start";
     this.error = null;
     cx.spawn(async (cx) => {
-      const r = await startBot(project.key, bot.id, { sleep: sleepOf(cx) });
+      const r = await startBot(project.key, bot.id, { sleep: sleepOf(cx) }, project.machine ?? null);
       this.busy = false;
       if (r.refused) this.error = r.refused;
       else { run("am-sidebar.refresh"); closeOverlay(this.p.overlay); }
@@ -395,7 +396,7 @@ export class BotForm {
     this.freshable = null;
     cx.spawn(async (cx) => {
       let r;
-      r = restartAnswer(await runCli(restartArgs({ botId: bot.id, projectKey: project.key, agent, force, fresh })));
+      r = restartAnswer(await runCli(restartArgs({ botId: bot.id, projectKey: project.key, agent, force, fresh, machine: project.machine ?? null })));
       this.busy = false;
       if (r.refused) {
         this.error = r.refused;
@@ -521,7 +522,7 @@ export class BotForm {
     this.busy = "detach";
     this.error = null;
     cx.spawn(async (cx) => {
-      const r = await runCli(["detach", this.p.bot, "--project", this.p.project]);
+      const r = await runCli(["detach", this.p.bot, "--project", this.p.project, ...(this.machine ? ["--machine", this.machine] : [])]);
       this.busy = false;
       if (r.code !== 0) this.error = r.err || `automagik-herdr detach failed (exit ${r.code}).`;
       else { run("am-sidebar.refresh"); closeOverlay(this.p.overlay); }
@@ -565,9 +566,10 @@ export class BotForm {
   // planned bot) and Inspect, what happened. A bot defined on a linked machine: Configure and
   // its Prompt, written there (remoteMenu).
   menuBody(t) {
-    if (this.machine) return this.remoteMenu(t);
-    const project = { key: this.p.project }, bot = { id: this.p.bot };
-    const local = (x) => (typeof x === "string" && x && !x.includes("/") ? x : null);
+    if (this.machine && this.p.stale) return this.remoteMenu(t);
+    const project = { key: this.p.project, machine: this.machine }, bot = { id: this.p.bot };
+    // The panes this bot can play: its project machine's (this computer's: a bare tN).
+    const local = (x) => (typeof x === "string" && x && (this.machine ? x.startsWith(`${this.machine}/`) : !x.includes("/")) ? x : null);
     const pane = local(this.p.terminal), live = local(this.p.live);
     const items = new Set(menuItems({ planned: Boolean(this.p.planned), live, pane }));
     const item = (id, label, onClick) => h_flex().id(id).h(30).px(10).items_center().rounded(7).cursor_pointer()
@@ -593,26 +595,19 @@ export class BotForm {
         : this.swapAgents.map((a) => item(`menu-restart-on-${a.key}`, `    ${a.name ?? a.key}`, (cx) => this.restart(project, bot, cx, { agent: a.key })))))
       .when(items.has("attach"), (el) => el.child(item("menu-attach", this.busy === "attach" ? "Attaching…" : `Attach to the focused pane (${pane})`, (cx) => this.attach(project, bot, cx))))
       .when(items.has("detach"), (el) => el.child(item("menu-detach", this.busy === "detach" ? "Detaching…" : `Detach from ${live}`, (cx) => this.detach(cx))))
-      .child(label("INSPECT"))
-      .child(item("menu-inspect", `What happened ${fold("inspect")}`, (cx) => this.toggle("inspect", cx)))
-      .when(this.shown.has("inspect"), (el) => el.child(this.historyView(t, note)));
+      // What happened reads this computer's ledgers; a linked machine's comes with part (c).
+      .when(!this.machine, (el) => el.child(label("INSPECT"))
+        .child(item("menu-inspect", `What happened ${fold("inspect")}`, (cx) => this.toggle("inspect", cx)))
+        .when(this.shown.has("inspect"), (el) => el.child(this.historyView(t, note))))
+      .when(Boolean(this.machine), (el) => el.child(div().id("menu-remote-note").px(10).pt(6).pb(4).text_size(12).text_color(t.muted)
+        .child(`On ${this.machine}. What happened isn't shown for its bots yet.`)));
   }
 
-  // A linked machine's bot: Configure and Prompt read and write its file there; Run and
-  // Inspect aren't offered from here yet. A machine that isn't answering (its rows drawn from
-  // the last run of Herdr, props.stale) offers nothing until it is back.
+  // A linked machine that isn't answering (its rows drawn from the last run of Herdr,
+  // props.stale): nothing to press until it is back.
   remoteMenu(t) {
-    const note = (s) => div().id("menu-remote-note").px(10).pt(6).pb(4).text_size(12).text_color(t.muted).child(s);
-    if (this.p.stale) return v_flex().p(6).child(note(`${this.machine} isn't answering, so ${this.p.name} shows as last seen. Configure and Prompt work once it is back.`));
-    const project = { key: this.p.project, machine: this.machine }, bot = { id: this.p.bot };
-    const item = (id, label, onClick) => h_flex().id(id).h(30).px(10).items_center().rounded(7).cursor_pointer()
-      .hover((s) => s.bg(t.hover)).on_click((_e, cx) => onClick(cx)).child(label);
-    const fold = (section) => (this.shown.has(section) ? "▾" : "▸");
-    return v_flex().p(6).gap(2)
-      .child(item("menu-configure", "Configure…", () => this.edit(project, bot)))
-      .child(item("menu-prompt", `Prompt ${fold("prompt")}`, (cx) => this.toggle("prompt", cx)))
-      .when(this.shown.has("prompt"), (el) => el.child(this.promptView(t)))
-      .child(note(`On ${this.machine}. Start, Attach and Inspect for its bots aren't in this menu yet.`));
+    return v_flex().p(6).child(div().id("menu-remote-note").px(10).pt(6).pb(4).text_size(12).text_color(t.muted)
+      .child(`${this.machine} isn't answering, so ${this.p.name} shows as last seen. Its menu works once it is back.`));
   }
 
   // The prompt in place: the bot's instructions, Save writes them as the Edit form would.
@@ -653,7 +648,7 @@ export class BotForm {
   }
 
   // The bots by project: click one to attach the pane (attach: this computer's), or Edit /
-  // Start / Restart (pick; a linked machine's project, named with its machine: Edit only).
+  // Start / Restart (pick; a linked machine's project named with its machine).
   listBody(t) {
     const label = (s) => div().pt(8).text_size(11).font_semibold().text_color(t.dim).child(s);
     if (!this.projects) return div().p(14).text_color(t.muted).child("Finding bots…");
@@ -670,7 +665,7 @@ export class BotForm {
           .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted)
             .child(b.planned ? `planned · wave ${b.planned.wave}` : b.kind === "main" ? "Main bot" : b.role))
           .when(pick, (el) => el.child(this.button(`edit-${b.id}`, "Edit", t, () => this.edit(q, b), { h: 22 }))
-            .when(!b.planned && !q.machine, (el) => el.child(this.button(`start-${b.id}`, "Start", t, (cx) => this.start(q, b, cx), { h: 22 }))
+            .when(!b.planned, (el) => el.child(this.button(`start-${b.id}`, "Start", t, (cx) => this.start(q, b, cx), { h: 22 }))
               .child(this.button(`restart-${b.id}`, "Restart", t, (cx) => this.restart(q, b, cx), { h: 22 })))))];
     });
     if (!rows.length && pick && !this.refreshing) {
@@ -1032,7 +1027,6 @@ export class BotForm {
             .child(this.glyph("copy", 12, t.foreground)).child(this.copied ? "Copied" : "Copy")))
         .child(btn("bot-cancel", done ? "Close" : "Cancel", () => closeOverlay(this.p.overlay), "ghost"))
         .when(!done, (el) => el.child(btn("bot-save", this.busy ? "Saving…" : save, (cx) => this.save(cx), "raised")))
-        // Start on a linked machine isn't offered from here yet (automagik#206).
-        .when(!done && creating && !state.planned && !this.machine, (el) => el.child(btn("bot-save-start", this.busy ? "Starting…" : "Create & start", (cx) => this.save(cx, true), "solid"))));
+        .when(!done && creating && !state.planned, (el) => el.child(btn("bot-save-start", this.busy ? "Starting…" : "Create & start", (cx) => this.save(cx, true), "solid"))));
   }
 }

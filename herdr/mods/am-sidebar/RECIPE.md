@@ -114,6 +114,13 @@ Herdr API: `spaces`, `machines`, `panes`, `agents`, `terminals`, `focused`, `run
 
 ## Watch out
 
+- **A linked machine's bots** (automagik#206): their file is written there through herdr-core
+  (`remoteFile.js`) and their panes run there (`hc run --on`). The command is built on this
+  computer from Herdr's agent table and `programs.json`, so an agent that needs other words
+  gets them from an entry under `programs` in `<app home>/programs.json`, e.g. the Hermes TUI:
+  `{"programs": {"hermes": {"run": ["hermes", "--tui"]}}}` (beside any entries already there).
+  Attach-ledger rows for those panes keep the bare `tN`, `machine` and that machine's core id.
+
 - **It is a clone of Herdr's `spaces`**: Herdr's later changes don't reach it, and every modified
   file must stay marked as changed (see `NOTICE` here).
 - **No cross-module imports in Herdr**: everything a view needs lives in this folder, which is why

@@ -146,7 +146,7 @@ test("restart --machine of a pane that reports no status: refused in plain words
   const refused = s.cli(["restart", "Atlas", ...s.on]);
   assert.equal(refused.code, 1);
   assert.match(refused.err, /vm\/t8 doesn't tell hc whether Atlas's agent is busy or waiting for an approval/);
-  assert.match(refused.err, /--force \(it sends the pane no keys/);
+  assert.match(refused.err, /pass --force to restart anyway \(it sends the pane no keys/);
   assert.equal(s.calls().filter((c) => c[0] === "run" || c[0] === "kill").length, 0);
   const r = s.cli(["restart", "Atlas", ...s.on, "--force", "--json"]);
   assert.equal(r.code, 0, r.err);

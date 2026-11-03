@@ -436,7 +436,7 @@ test("Bot settings (pick) draws the sidebar's known bots before discovery answer
   assert.ok(nodes.has(`pick-${MAIN.id}`), "the known bot shows at once");
   assert.ok(nodes.has(`pick-${KIMI.id}`), "a linked machine's project shows too");
   assert.match(textOf(nodes.get("bot-form-body")), /ELSEWHERE · box/);
-  assert.ok(nodes.has(`edit-${KIMI.id}`) && !nodes.has(`start-${KIMI.id}`) && !nodes.has(`restart-${KIMI.id}`), "Edit only, for now");
+  assert.ok(nodes.has(`edit-${KIMI.id}`) && nodes.has(`start-${KIMI.id}`) && nodes.has(`restart-${KIMI.id}`), "Edit, Start and Restart there");
   assert.ok(nodes.has(`start-${MAIN.id}`));
   await cx.settle();
   index(form.render(cx));
@@ -692,17 +692,33 @@ test("menu busy labels: only the running action's item changes", async () => {
 
 // ---- automagik#206: a project on a linked machine ("vm": its files are scratch paths here) ----
 
-test("menu on a linked machine: Configure and Prompt, no Run or Inspect yet; Configure opens the form there", async () => {
+test("menu on a linked machine: Configure, Prompt and Run there; no What happened yet; Configure opens the form there", async () => {
   seed([MAIN, OMP]);
   const { draw, click } = await menu({ machine: "vm" });
   draw();
-  assert.ok(nodes.has("menu-configure") && nodes.has("menu-prompt"));
-  for (const id of ["menu-start", "menu-restart", "menu-attach", "menu-detach", "menu-focus", "menu-inspect"]) assert.ok(!nodes.has(id), id);
-  assert.match(textOf(nodes.get("menu-remote-note")), /On vm\. Start, Attach and Inspect/);
+  for (const id of ["menu-configure", "menu-prompt", "menu-start", "menu-restart"]) assert.ok(nodes.has(id), id);
+  for (const id of ["menu-attach", "menu-detach", "menu-focus", "menu-inspect"]) assert.ok(!nodes.has(id), id);
+  assert.match(textOf(nodes.get("menu-remote-note")), /On vm\. What happened isn't shown/);
   assert.doesNotMatch(textOf(nodes.get("bot-form-body")), /work from that computer/);
   state.opened = [];
   await click("menu-configure");
   assert.deepEqual(state.opened[0].props, { form: "edit", bot: OMP.id, project, machine: "vm" });
+});
+
+test("menu on a linked machine, running: Focus and Detach its pane there; Attach only to a pane of that machine; actions pass --machine", async () => {
+  seed([MAIN, OMP]);
+  const there = await menu({ machine: "vm", live: "vm/t8", terminal: "vm/t3" });
+  there.draw();
+  for (const id of ["menu-focus", "menu-detach", "menu-attach", "menu-restart"]) assert.ok(nodes.has(id), id);
+  assert.match(textOf(nodes.get("menu-attach")), /vm\/t3/);
+  state.calls = [];
+  await there.click("menu-detach");
+  const cli = state.calls.find((c) => c.kind === "exec" && c.args.includes("detach"));
+  assert.ok(cli && cli.args.includes("--machine") && cli.args[cli.args.indexOf("--machine") + 1] === "vm");
+  // A pane of this computer (or another machine) focused: no Attach for a vm bot.
+  const here = await menu({ machine: "vm", live: "vm/t8", terminal: "t3" });
+  here.draw();
+  assert.ok(!nodes.has("menu-attach"));
 });
 
 test("menu on a linked machine that isn't answering: its last-seen note, nothing to press", async () => {
@@ -764,14 +780,14 @@ test("Edit form on a linked machine: its agents and file there, the CLI line nam
   assert.doesNotMatch(away.form.error ?? "", /changed since/);
 });
 
-test("Create from a focused space on a linked machine: that machine's project, created there, no Create & start", async () => {
+test("Create from a focused space on a linked machine: that machine's project, created there", async () => {
   state.spaces = [{ id: "s1", folder: project, machine: "vm", name: "hedge" }];
   state.focused = { space: "s1" };
   const { form, cx, draw, click } = await open({ form: "create", project: undefined });
   draw();
   assert.equal(form.key, project);
   assert.equal(form.machine, "vm");
-  assert.ok(nodes.has("bot-save") && !nodes.has("bot-save-start"), "Start there isn't offered yet");
+  assert.ok(nodes.has("bot-save") && nodes.has("bot-save-start"));
   form.inputs.name.type("Hedge", cx);
   draw();
   await click("bot-save");

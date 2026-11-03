@@ -684,8 +684,9 @@ export const USAGE = `automagik-herdr: Automagik Herdr's bots and updates from t
 
 Usage: automagik-herdr <command> [options]      (every command takes --json and --project <folder>)
        automagik-herdr <command> --machine M --project <folder there> ...
-                                                 ls, show, create, edit, rm and category on a
-                                                 linked machine (hc machine ls), through hc
+                                                 ls, show, create, edit, rm, category, start,
+                                                 restart, attach, detach and whois on a linked
+                                                 machine (hc machine ls), through hc
        automagik-herdr --version                 the installed pack's version
 
   ls [--all]                    bots with kind, lead, category, rank, planned, agent, model, pane, status
@@ -762,7 +763,9 @@ pane with hc label changes nothing.
 A bot is its id or its name in the project. The project is the one the current folder
 keys to (its git main checkout), or --project's. With --machine, --project is an absolute
 folder on that machine and the file is read and written there by the same rule (a file
-changed since it was read is never overwritten); its panes aren't tracked from here yet.`;
+changed since it was read is never overwritten); its panes run there (M/tN). A pane that
+reports no status to hc can't say it is waiting for an approval: restart refuses it unless
+--force, which still sends it no keys.`;
 
 function readInstructions(opts) {
   if (opts.instructions !== undefined && opts["instructions-file"] !== undefined) throw new CliError("Give --instructions or --instructions-file, not both.", 2);
@@ -1396,8 +1399,8 @@ async function restartOnMachine(opts, project, bot, entry) {
     if (refusal) throw new CliError(refusal);
     if (!old.status && !opts.force) {
       throw new CliError(`${old.address} doesn't tell hc whether ${bot.name}'s agent is busy or waiting for an approval, so a restart `
-        + `could end it mid-turn. Nothing was restarted. Look at the pane first; to restart anyway: automagik-herdr restart ${bot.id} `
-        + `--machine ${machine} --project ${key} --force (it sends the pane no keys: it starts a new pane, then ends this one).`);
+        + `could end it mid-turn. Nothing was restarted. Look at the pane first, then pass --force to restart anyway `
+        + `(it sends the pane no keys: it starts a new pane, then ends this one).`);
     }
   }
   const agentKey = entry?.agent ?? bot.agent;

@@ -137,10 +137,23 @@ const starting = new Set();
  * planned bot, no agent, an unlisted model pin) come back as { refused }. `place.sleep`
  * (sleepOf(cx)) lets it open a space on the project when none shows it (placeFor).
  */
-export async function startBot(projectKey, botId, place = {}) {
+export async function startBot(projectKey, botId, place = {}, machine = null) {
   if (starting.has(botId)) return { refused: `${botId} is already starting.` };
   starting.add(botId);
-  try { return await startOnce(projectKey, botId, place); } finally { starting.delete(botId); }
+  try { return await (machine ? startOn(projectKey, botId, machine) : startOnce(projectKey, botId, place)); } finally { starting.delete(botId); }
+}
+
+// Start on a linked machine (automagik#206): the CLI finds the window place there itself.
+async function startOn(projectKey, botId, machine) {
+  const r = await runCli(["start", botId, "--project", projectKey, "--machine", machine]);
+  if (r.code !== 0) return refusedBy(r, "start");
+  if (r.out?.running) {
+    run("agent.focus", { terminal: `${machine}/${r.out.running}` });
+    return { focused: `${machine}/${r.out.running}` };
+  }
+  warn(r.out?.warnings);
+  rememberProject(projectKey, machine);
+  return { terminal: r.out?.terminal ? `${machine}/${r.out.terminal}` : null };
 }
 
 async function startOnce(projectKey, botId, place) {
@@ -162,11 +175,16 @@ async function startOnce(projectKey, botId, place) {
  * attach row and sets the labels). Never a silent move: a bot the ledger ties to another
  * pane is refused, naming it (the CLI's `attach --move` moves it).
  */
-export async function attachBot(projectKey, botId, terminal) {
-  if (!local(terminal)) return { refused: `Attach works on this computer's panes only; ${terminal} is on another machine.` };
-  const r = await runCli(["attach", botId, terminal, "--project", projectKey]);
+export async function attachBot(projectKey, botId, terminal, machine = null) {
+  // A bot plays a pane on its project's machine only (this computer's, or that linked one's).
+  const mine = machine ? typeof terminal === "string" && terminal.startsWith(`${machine}/`) : local(terminal);
+  if (!mine) {
+    return { refused: machine ? `${terminal} isn't on ${machine}, where this bot's project is; focus one of ${machine}'s panes.`
+      : `Attach works on this computer's panes only; ${terminal} is on another machine.` };
+  }
+  const r = await runCli(["attach", botId, terminal, "--project", projectKey, ...(machine ? ["--machine", machine] : [])]);
   if (r.code !== 0) return refusedBy(r, "attach");
   warn(r.out?.warnings);
-  rememberProject(projectKey);
+  rememberProject(projectKey, machine);
   return { ok: true };
 }

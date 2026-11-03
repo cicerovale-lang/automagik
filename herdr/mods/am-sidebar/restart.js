@@ -116,8 +116,9 @@ export function planText(plan, session) {
  * this app home): `agent`: Restart on… (a swap); `force`: past a working pane or its helpers;
  * `fresh`: a new conversation.
  */
-export function restartArgs({ botId, projectKey, agent = null, force = false, fresh = false }) {
-  return ["restart", botId, "--project", projectKey, ...(agent ? ["--agent", agent] : []), ...(force ? ["--force"] : []), ...(fresh ? ["--fresh"] : [])];
+export function restartArgs({ botId, projectKey, agent = null, force = false, fresh = false, machine = null }) {
+  return ["restart", botId, "--project", projectKey, ...(machine ? ["--machine", machine] : []),
+    ...(agent ? ["--agent", agent] : []), ...(force ? ["--force"] : []), ...(fresh ? ["--fresh"] : [])];
 }
 
 /**
