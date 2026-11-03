@@ -212,6 +212,7 @@ jobs:
           node scripts/catalog.mjs --check
           node scripts/version.mjs check
           node scripts/entries.mjs --check
+          node scripts/parts.mjs --check
 
       # Before the cut, so a release that packs the pack never goes out without a pointer the
       # installed packs trust: HERDR_PACK_KEY must be a key pack-keys.json lists (its keyId is the

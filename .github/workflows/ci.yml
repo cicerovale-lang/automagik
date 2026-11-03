@@ -114,6 +114,10 @@ jobs:
       - name: No layouts/ in a herdr-mod entry folder
         run: node scripts/entries.mjs --check
 
+      # Every part.json under herdr/ and herdr-layout/ (RFC 0012): its fields, and what it names exists.
+      - name: Parts (part.json)
+        run: node scripts/parts.mjs --check
+
       - name: One version (the root's)
         if: steps.changed.outputs.herdr == 'true'
         run: node scripts/version.mjs check

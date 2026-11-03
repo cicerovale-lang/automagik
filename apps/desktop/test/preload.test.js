@@ -46,3 +46,18 @@ test('during a click, open() sends the Bot id and nothing else; status() asks wi
   ])
   assert.ok(Object.isFrozen(herdr))
 })
+
+test('an answer to the update offer: only a boolean update reaches main, still only on a click', async () => {
+  const { herdr, invoked } = loadPreload({ activation: true })
+  await herdr.open({ botId: 'b1', update: true })
+  await herdr.open({ botId: 'b1', update: false })
+  await herdr.open({ botId: 'b1', update: 'yes', url: 'https://evil.example/herdr.tar.gz' })
+  assert.deepEqual(JSON.parse(JSON.stringify(invoked)), [
+    ['automagik-herdr-open', { botId: 'b1', update: true }],
+    ['automagik-herdr-open', { botId: 'b1', update: false }],
+    ['automagik-herdr-open', { botId: 'b1' }],
+  ])
+  const idle = loadPreload({ activation: false })
+  await assert.rejects(idle.herdr.open({ botId: 'b1', update: true }), /only on a click/)
+  assert.deepEqual(idle.invoked, [])
+})

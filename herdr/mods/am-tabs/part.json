@@ -1,0 +1,51 @@
+{
+  "id": "herdr.am-tabs",
+  "title": "Automagik Tabs",
+  "kind": "herdr-mod",
+  "paths": [
+    "herdr/mods/am-tabs/**"
+  ],
+  "provides": [
+    "herdr.tabs@1"
+  ],
+  "requires": [
+    {
+      "cap": "herdr.pack",
+      "major": 1
+    },
+    {
+      "cap": "herdr.new-menu",
+      "major": 1
+    }
+  ],
+  "os": [
+    "macos"
+  ],
+  "targets": "local",
+  "artifact": "automagik-herdr-pack-{version}.tgz",
+  "select": "am-tabs/",
+  "entry": {
+    "install": [
+      "node",
+      "../am-sidebar/bin/part.mjs",
+      "install",
+      "herdr.am-tabs"
+    ],
+    "uninstall": [
+      "node",
+      "../am-sidebar/bin/part.mjs",
+      "uninstall",
+      "herdr.am-tabs"
+    ],
+    "doctor": [
+      "node",
+      "../am-sidebar/bin/part.mjs",
+      "doctor",
+      "herdr.am-tabs"
+    ]
+  },
+  "writes": [],
+  "set": [
+    "code"
+  ]
+}

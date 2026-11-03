@@ -1,6 +1,6 @@
 {
   "name": "@automagik/unfold-trajectory-dsh",
-  "version": "3.63.1",
+  "version": "3.64.1",
   "description": "Unfold's real-time trajectory for DeepSeek Harness: a fork of DeepSeek's trajectory UI (@deepseek-ai/dsh-client-ui-trajectory 0.2.1-rc.3, MIT) that keeps its ledger, overview and inspector and reads Unfold's Mind stream instead",
   "keywords": [
     "dsh-plugin",

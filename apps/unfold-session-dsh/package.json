@@ -1,6 +1,6 @@
 {
   "name": "@automagik/unfold-session-dsh",
-  "version": "3.63.1",
+  "version": "3.64.1",
   "description": "Unfold's rolling session as one DSH root Session, in the DSH of Unfold's own instance: what you type in its composer reaches Unfold only through Unfold's own control endpoint, once, and Unfold's replies stream back as chat bubbles. DSH makes no model call for it, and spoken turns are shown, never sent",
   "keywords": [
     "dsh-plugin",

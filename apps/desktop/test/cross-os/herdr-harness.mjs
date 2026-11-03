@@ -1,17 +1,22 @@
-// RFC 0013 delivery 1 on a real OS (.github/workflows/herdr-harness.yml, CI runners only: it
-// installs herdr-app and drives its window). It checks herdrdev's feed and the sha256 of this
-// OS's build, installs herdr-app with herdrdev's own installer, then runs the app's own finder
-// and start-or-raise (src/herdr.js) on a temp HERDR_APP_HOME: status, ls, do space.new, and a
-// raise from behind another window. Each check is one JSON line in $OUT/results.jsonl; the
-// table goes to $GITHUB_STEP_SUMMARY. It exits 1 when a check delivery 1 needs fails.
+// RFC 0013 deliveries 1 and 2 on a real OS (.github/workflows/herdr-harness.yml, CI runners
+// only: it installs herdr-app and drives its window). It checks herdrdev's feed and the sha256
+// of this OS's build, installs herdr-app with herdrdev's own installer, then runs the app's own
+// finder and start-or-raise (src/herdr.js) on a temp HERDR_APP_HOME: status, ls, do space.new,
+// and a raise from behind another window. Then delivery 2 (src/herdr-update.js): herdrdev's
+// installer puts back an older build (from a local copy of the feed naming it), and the open
+// is driven through offline, the offer, no, and yes with the window open and closed; yes must
+// end on the feed's version. Each check is one JSON line in $OUT/results.jsonl; the table goes
+// to $GITHUB_STEP_SUMMARY. It exits 1 when a check a delivery needs fails.
 //
 //   node test/cross-os/herdr-harness.mjs        (Linux: under xvfb-run, with a window manager)
-import { execFile, spawn } from 'node:child_process'
+import { execFile, execFileSync, spawn } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
+import { createServer } from 'node:http'
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { OVERRIDE, findHerdr, frontmost, openHerdr, run } from '../../src/herdr.js'
+import { OFFLINE, compareVersions, installedVersion, openLatest, readFeed } from '../../src/herdr-update.js'
 
 const FEED = 'https://releases.herdr.dev/app/latest.json'
 const platform = process.platform
@@ -55,14 +60,17 @@ async function feed() {
   record('feed sha256', sha === build.sha256, `${manifest.version} ${build.url}: ${bytes.length} bytes, sha256 ${sha}${sha === build.sha256 ? ' matches' : ` != feed ${build.sha256}`}`, { value: manifest.version })
 }
 
-function install() {
+// herdrdev's installer, as published; `releases` points it at another feed (it reads
+// HERDR_RELEASES_URL), as delivery 2's older build does.
+function install({ check = 'install (herdrdev installer)', releases } = {}) {
   return new Promise(done => {
     const [file, args] = platform === 'win32'
       ? ['powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'irm https://releases.herdr.dev/app/install.ps1 | iex']]
       : ['sh', ['-c', 'curl -fsSL https://releases.herdr.dev/app/install.sh | sh']]
-    execFile(file, args, { env: base, timeout: 300_000, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
-      record('install (herdrdev installer)', !error, `${error ? `failed: ${error.message}\n` : ''}${stdout}${stderr}`)
-      done()
+    const installEnv = releases ? { ...base, HERDR_RELEASES_URL: releases } : base
+    execFile(file, args, { env: installEnv, timeout: 300_000, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+      record(check, !error, `${error ? `failed: ${error.message}\n` : ''}${stdout}${stderr}`)
+      done(!error)
     })
   })
 }
@@ -143,6 +151,114 @@ async function main() {
   record('shot', null, shown(shot), { needed: false })
 }
 
+// Delivery 2. herdrdev keeps older builds at their versioned URLs
+// (releases.herdr.dev/app/<version>/herdr-app-<target>.tar.gz) but publishes a sha256 only for
+// the latest, in latest.json. So the older build's feed is a local copy: the real versioned URL,
+// and a sha256 this run computes from the download (trust on first use, CI only). herdrdev's
+// installer reads it through HERDR_RELEASES_URL; anything else it asks of that address goes on
+// to releases.herdr.dev.
+async function olderBuild(latest) {
+  const [major, minor, patch] = latest.split(/[.-]/).map(Number)
+  for (let back = 1; back <= Math.min(patch, 3); back++) {
+    const version = `${major}.${minor}.${patch - back}`
+    const url = `https://releases.herdr.dev/app/${version}/herdr-app-${target}.tar.gz`
+    const response = await fetch(url).catch(() => null)
+    if (!response?.ok) continue
+    const bytes = Buffer.from(await response.arrayBuffer())
+    return { version, url, sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.length }
+  }
+  return null
+}
+
+function feedServer(older) {
+  const manifest = JSON.stringify({ version: older.version, notes: `harness: ${older.version}`, targets: { [target]: { url: older.url, sha256: older.sha256 } } }, null, 2)
+  const server = createServer((request, response) => {
+    if (request.url.split('?')[0] === '/app/latest.json') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      return response.end(manifest)
+    }
+    response.writeHead(302, { location: `https://releases.herdr.dev${request.url}` })
+    response.end()
+  })
+  return new Promise(done => server.listen(0, '127.0.0.1', () => done({ server, releases: `http://127.0.0.1:${server.address().port}` })))
+}
+
+// The window closed (its terminals live on in herdr-core): herdr-app's own command, else the
+// process ended. CI only, on the harness's own HERDR_APP_HOME.
+async function closeHerdr(bin) {
+  const closed = async () => {
+    for (let i = 0; i < 40; i++) {
+      if ((await run(bin, ['status'], { env })).code === 2) return true
+      await sleep(250)
+    }
+    return false
+  }
+  const asked = await run(bin, ['do', platform === 'darwin' ? 'app.quit' : 'window.close'], { env })
+  if (await closed()) return `closed (${shown(asked)})`
+  try {
+    if (platform === 'win32') execFileSync('taskkill', ['/F', '/IM', 'herdr-app.exe'])
+    else execFileSync('pkill', ['-f', platform === 'darwin' ? 'Herdr.app/Contents/MacOS/Herdr' : 'herdr-app/herdr-app'])
+  } catch {}
+  return (await closed()) ? `ended (${shown(asked)})` : `still open (${shown(asked)})`
+}
+
+async function latest() {
+  const feed = await readFeed({ platform, arch: process.arch })
+  record('d2: the feed for this target', Boolean(feed.version), JSON.stringify(feed))
+  if (!feed.version) return
+  const older = await olderBuild(feed.version)
+  record('d2: an older build herdrdev keeps', older !== null, older ? `${older.version}: ${older.url} (${older.size} bytes, sha256 ${older.sha256}, computed here)` : `none of the three versions before ${feed.version} is kept for ${target}`, { value: older?.version })
+  if (!older) return
+  const { server, releases } = await feedServer(older)
+  const found = () => findHerdr(host)
+  const version = async () => installedVersion(found().bin, { env })
+  const downgrade = async (check) => {
+    const bin = found()?.bin
+    if (bin) record(`${check}: window closed first`, null, await closeHerdr(bin), { needed: false })
+    if (!(await install({ check: `${check}: herdrdev's installer, older feed`, releases }))) return false
+    const now = await version()
+    record(`${check}: installed ${older.version}`, now === older.version, `--version: ${now}`)
+    return now === older.version
+  }
+  const step = async (check, options, expect) => {
+    const logs = []
+    const marks = []
+    const t0 = Date.now()
+    const result = await openLatest({ ...host, ...options, log: line => logs.push(line), mark: mark => marks.push(`${mark} +${Date.now() - t0} ms`) })
+    const now = await version()
+    const ok = expect(result, now)
+    record(check, ok, `${JSON.stringify(result)}\n--version after: ${now}\nsteps: ${marks.join(', ')}\nlog: ${logs.join(' | ')}`, { value: now })
+    return result
+  }
+  try {
+    if (!(await downgrade('d2: downgrade'))) return
+    // Before any window has run the older build on this home, so its own updater has not had
+    // a chance to fetch the new one yet: offline, then the offer, then no.
+    await step('d2: offline opens the installed one, with the note', { fetch: () => Promise.reject(new TypeError('fetch failed')) },
+      (result, now) => result.ok && result.note === OFFLINE && now === older.version)
+    await step('d2: online, no answer yet: the offer, nothing else', {},
+      (result, now) => result.reason === 'update' && result.installed === older.version && result.latest === feed.version && now === older.version)
+    await step('d2: no opens the installed one', { update: false, skip: feed.version },
+      (result, now) => result.ok && now === older.version)
+    await step('d2: yes with the window open ends on the feed\'s version', { update: true, offered: feed.version },
+      (result, now) => result.ok && result.version === feed.version && now === feed.version && compareVersions(now, older.version) > 0)
+    const status = await run(found().bin, ['status'], { env })
+    record('d2: the window answers after the update', status.code === 0, shown(status))
+    if (status.code !== 0) {
+      // Did Herdr's own restart drop HERDR_APP_HOME (a variable only this harness sets)?
+      const homeless = await run(found().bin, ['status'], { env: base })
+      record('d2: (diagnostic) status on the default home', null, shown(homeless), { needed: false })
+    }
+    if (!(await downgrade('d2: downgrade again'))) return
+    await step('d2: yes with the window closed ends on the feed\'s version', { update: true, offered: feed.version },
+      (result, now) => result.ok && result.version === feed.version && now === feed.version)
+    const after = await run(found().bin, ['status'], { env })
+    record('d2: the window answers on the new build', after.code === 0, shown(after))
+  } finally {
+    server.close()
+  }
+}
+
 function summary() {
   const cell = row => (row.ok === true ? 'pass' : row.ok === false ? '**fail**' : 'info')
   const md = [`### herdr-app on ${target}`, '', '| check | result | detail |', '|---|---|---|',
@@ -155,6 +271,11 @@ try {
   await main()
 } catch (error) {
   record('harness', false, error.stack)
+}
+try {
+  await latest()
+} catch (error) {
+  record('d2: harness', false, error.stack)
 }
 summary()
 console.log(readFileSync(join(out, 'summary.md'), 'utf8'))

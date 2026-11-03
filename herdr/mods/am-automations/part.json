@@ -1,0 +1,47 @@
+{
+  "id": "herdr.am-automations",
+  "title": "Automagik Automations",
+  "kind": "herdr-mod",
+  "paths": [
+    "herdr/mods/am-automations/**"
+  ],
+  "provides": [
+    "herdr.automations@1"
+  ],
+  "requires": [
+    {
+      "cap": "herdr.pack",
+      "major": 1
+    }
+  ],
+  "os": [
+    "macos"
+  ],
+  "targets": "local",
+  "artifact": "automagik-herdr-pack-{version}.tgz",
+  "select": "am-automations/",
+  "entry": {
+    "install": [
+      "node",
+      "../am-sidebar/bin/part.mjs",
+      "install",
+      "herdr.am-automations"
+    ],
+    "uninstall": [
+      "node",
+      "../am-sidebar/bin/part.mjs",
+      "uninstall",
+      "herdr.am-automations"
+    ],
+    "doctor": [
+      "node",
+      "../am-sidebar/bin/part.mjs",
+      "doctor",
+      "herdr.am-automations"
+    ]
+  },
+  "writes": [],
+  "set": [
+    "code"
+  ]
+}

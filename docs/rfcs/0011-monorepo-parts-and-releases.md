@@ -21,6 +21,14 @@ This RFC covers the herdr part, imported from `automagik-dev/automagik-herdr` wi
 and Pocket, imported from `automagik-dev/automagik-pocket` with its history ("Pocket" below: its
 lane, the versionCode guard, `latest.json` on `pocket-lane`, the signing secrets, the bridge).
 
+**Amended by [RFC 0012](0012-am-cli-and-parts.md) (D35, 2026-11-03).** `am` is its own part,
+in a top-level `am/` folder, and the one exception to "a release attaches only the parts it
+rebuilt": every `vX.Y.Z` release attaches `automagik-am-<v>.tgz` and re-signs a rolling `am-lane`
+pointer with am's own key, whatever its lane kind. An am-only merge is a new lane kind, `am`
+(3.N.P). `am-lane` follows `herdr-lane`'s rules below (check-key before the tag, fail-closed
+posting, no lower sequence). RFC 0012's deliveries make the `release.yml` and `lane.ts` changes;
+until they ship, this RFC describes the releases as they are.
+
 ## Motivation
 
 The owner decided (2026-11-03) that the herdr pack and Pocket are Automagik, not standalone

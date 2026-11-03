@@ -1,6 +1,6 @@
 {
   "name": "@automagik/unfold-bot-dsh",
-  "version": "3.63.1",
+  "version": "3.64.1",
   "description": "Unfold for DeepSeek Harness: the Unfold Bot on the Automagik Bot team, with the Unfold plugins and the Unfold bridge as its defaults",
   "keywords": [
     "dsh-plugin",

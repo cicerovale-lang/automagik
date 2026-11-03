@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from '
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { BUNDLE_ID, NO_FOCUS, NOT_OPENED, OVERRIDE, findHerdr, herdrStatus, launchOf, openHerdr, supportedHost, waitOpen } from '../src/herdr.js'
+import { BUNDLE_ID, GRACE_MS, NO_FOCUS, NOT_OPENED, OVERRIDE, findHerdr, herdrStatus, launchOf, openHerdr, supportedHost, waitOpen } from '../src/herdr.js'
 
 // A fake file system: the files that exist, and the links that resolve elsewhere.
 const fakeFs = (files, links = {}) => ({
@@ -153,20 +153,34 @@ test('open gives up after 10 s of exit 2 with herdr-app\'s last line, and report
   assert.deepEqual(await openHerdr({ ...LINUX, env: { [OVERRIDE]: '/nowhere' } }), { ok: false, reason: 'missing', message: 'Herdr is not set up' })
 })
 
-test('only exit 2 keeps waiting: exit 1 stops at once with herdr-app\'s own error', posixOnly, async () => {
-  const fake = fakeHerdr([2, 1, 0])
-  const waited = await waitOpen(fake.exe, { env: {}, sleep: instant })
+// Virtual time: sleeps return at once and move the clock.
+function clock() {
+  let offset = 0
+  return { now: () => Date.now() + offset, sleep: async ms => { offset += ms } }
+}
+
+test('a brief exit 1 right after a start is borne for the grace; then status answering 0 opens', posixOnly, async () => {
+  const fake = fakeHerdr([2, 1, 1, 0])
+  const waited = await waitOpen(fake.exe, { env: {}, ...clock() })
+  assert.equal(waited.ready, true)
+  assert.deepEqual(fake.calls(), [['status'], ['status'], ['status'], ['status']])
+})
+
+test('an exit 1 that lasts past the grace stops the wait with herdr-app\'s own error', posixOnly, async () => {
+  const fake = fakeHerdr([2, 1])
+  const waited = await waitOpen(fake.exe, { env: {}, ...clock() })
   assert.equal(waited.ready, false)
   assert.equal(waited.failed, true)
   assert.equal(waited.code, 1)
   assert.equal(waited.stderr, 'herdr-app: something broke')
-  assert.deepEqual(fake.calls(), [['status'], ['status']])
+  assert.ok(waited.ms >= GRACE_MS && waited.ms < GRACE_MS + 500, `stopped at ${waited.ms} ms`)
   const again = fakeHerdr([1])
   const logged = []
-  const result = await openHerdr({ ...LINUX, env: { PATH: again.bin }, sleep: instant, log: line => logged.push(line) })
+  const result = await openHerdr({ ...LINUX, env: { PATH: again.bin }, ...clock(), log: line => logged.push(line) })
   assert.deepEqual(result, { ok: false, reason: 'error', message: 'herdr-app: something broke', detail: 'herdr-app: something broke' })
   assert.deepEqual(logged, ['status-error herdr-app: something broke'])
-  assert.equal(again.calls().filter(args => args[0] === 'status').length, 1)
+  const asked = again.calls().filter(args => args[0] === 'status').length
+  assert.ok(asked > 1 && asked <= GRACE_MS / 250 + 2, `${asked} status calls`)
 })
 
 test('waitOpen stops as soon as status answers 0', posixOnly, async () => {

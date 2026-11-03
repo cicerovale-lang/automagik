@@ -223,7 +223,10 @@ changes the install side:
   Herdr; the switch adds nothing to that.
 - **The install and updates.** herdr-app is a third-party app. Each download is checked against
   the sha256 in herdrdev's `latest.json`; that proves the file matches the feed, not who made
-  it. herdr-app also updates itself, and no release passes a review of ours.
+  it. The feed and its sha256 come from the same host, `releases.herdr.dev`, so that host is
+  trusted in full: whoever controls it controls what installs. The switch reads the feed and
+  downloads builds from that host alone, over https, with redirects refused. herdr-app also
+  updates itself, and no release passes a review of ours.
 - **Undo.** Revert the release. The switch keeps no state but its log.
 
 ## Failure modes

@@ -1,0 +1,73 @@
+{
+  "id": "herdr.layout",
+  "title": "The automagik layout",
+  "kind": "herdr-layout",
+  "paths": [
+    "herdr-layout/automagik.json"
+  ],
+  "provides": [
+    "herdr.layout@1"
+  ],
+  "requires": [
+    {
+      "cap": "bots.sidebar",
+      "major": 1
+    },
+    {
+      "cap": "herdr.footer",
+      "major": 1
+    },
+    {
+      "cap": "herdr.tabs",
+      "major": 1
+    },
+    {
+      "cap": "herdr.status-bar",
+      "major": 1
+    },
+    {
+      "cap": "herdr.automations",
+      "major": 1
+    },
+    {
+      "cap": "herdr.quota",
+      "major": 1
+    },
+    {
+      "cap": "herdr.markdown",
+      "major": 1
+    }
+  ],
+  "os": [
+    "macos"
+  ],
+  "targets": "local",
+  "artifact": "automagik-herdr-pack-{version}.tgz",
+  "select": "layouts/",
+  "entry": {
+    "install": [
+      "node",
+      "../am-sidebar/bin/part.mjs",
+      "install",
+      "herdr.layout"
+    ],
+    "uninstall": [
+      "node",
+      "../am-sidebar/bin/part.mjs",
+      "uninstall",
+      "herdr.layout"
+    ],
+    "doctor": [
+      "node",
+      "../am-sidebar/bin/part.mjs",
+      "doctor",
+      "herdr.layout"
+    ]
+  },
+  "writes": [
+    "~/.config/herdr-app/layouts/automagik.json"
+  ],
+  "set": [
+    "code"
+  ]
+}

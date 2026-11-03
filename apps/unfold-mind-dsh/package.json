@@ -1,6 +1,6 @@
 {
   "name": "@automagik/unfold-mind-dsh",
-  "version": "3.63.1",
+  "version": "3.64.1",
   "description": "The Mind stream for DeepSeek Harness: every event Unfold's agent and host emit, as one plain sentence, grouped into episodes, with an audit panel per event and an append-only local suggestion log. Read-only: it follows the unfold-events window and, when the instance names one, its host journal",
   "keywords": [
     "dsh-plugin",

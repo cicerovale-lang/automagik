@@ -23,7 +23,10 @@ name: Follow Omni
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    # Off the top and the half of the hour, where GitHub delays and drops scheduled runs. A
+    # change to this line also makes its committer the schedule's actor (GitHub's documented
+    # way to bring back a schedule that stopped firing).
+    - cron: '11,41 * * * *'
   workflow_dispatch:
     inputs:
       dry_run:

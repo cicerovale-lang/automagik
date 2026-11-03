@@ -1,0 +1,51 @@
+{
+  "id": "herdr.am-footer",
+  "title": "Automagik Footer",
+  "kind": "herdr-mod",
+  "paths": [
+    "herdr/mods/am-footer/**"
+  ],
+  "provides": [
+    "herdr.footer@1"
+  ],
+  "requires": [
+    {
+      "cap": "herdr.pack",
+      "major": 1
+    },
+    {
+      "cap": "herdr.mod-manager",
+      "major": 1
+    }
+  ],
+  "os": [
+    "macos"
+  ],
+  "targets": "local",
+  "artifact": "automagik-herdr-pack-{version}.tgz",
+  "select": "am-footer/",
+  "entry": {
+    "install": [
+      "node",
+      "../am-sidebar/bin/part.mjs",
+      "install",
+      "herdr.am-footer"
+    ],
+    "uninstall": [
+      "node",
+      "../am-sidebar/bin/part.mjs",
+      "uninstall",
+      "herdr.am-footer"
+    ],
+    "doctor": [
+      "node",
+      "../am-sidebar/bin/part.mjs",
+      "doctor",
+      "herdr.am-footer"
+    ]
+  },
+  "writes": [],
+  "set": [
+    "code"
+  ]
+}

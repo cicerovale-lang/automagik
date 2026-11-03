@@ -1,6 +1,6 @@
 {
   "name": "@automagik/unfold-settings-dsh",
-  "version": "3.63.1",
+  "version": "3.64.1",
   "description": "Unfold's settings for DSH, read-only: the effective runtime, prompt, voice and context settings, each with its source and how fresh it is, read from the Unfold session's host status and the agent's event window. A value nobody reports says unknown; nothing is assumed",
   "keywords": [
     "dsh-plugin",

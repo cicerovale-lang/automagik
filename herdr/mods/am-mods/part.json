@@ -1,0 +1,49 @@
+{
+  "id": "herdr.am-mods",
+  "title": "Automagik Mods (mod manager)",
+  "kind": "herdr-mod",
+  "paths": [
+    "herdr/mods/am-mods/**"
+  ],
+  "provides": [
+    "herdr.mod-manager@1"
+  ],
+  "requires": [
+    {
+      "cap": "herdr.pack",
+      "major": 1
+    }
+  ],
+  "os": [
+    "macos"
+  ],
+  "targets": "local",
+  "artifact": "automagik-herdr-pack-{version}.tgz",
+  "select": "am-mods/",
+  "entry": {
+    "install": [
+      "node",
+      "../am-sidebar/bin/part.mjs",
+      "install",
+      "herdr.am-mods"
+    ],
+    "uninstall": [
+      "node",
+      "../am-sidebar/bin/part.mjs",
+      "uninstall",
+      "herdr.am-mods"
+    ],
+    "doctor": [
+      "node",
+      "../am-sidebar/bin/part.mjs",
+      "doctor",
+      "herdr.am-mods"
+    ]
+  },
+  "writes": [
+    "~/.config/herdr-app/keys.json#global.cmd-shift-m"
+  ],
+  "set": [
+    "code"
+  ]
+}

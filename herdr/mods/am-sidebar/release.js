@@ -87,13 +87,15 @@ export const sumsName = (version) => `${tarballName(version)}.sha256`;
 
 /**
  * The installer's ownership record (`<app home>/automagik-herdr/installed-by-install.sh`) as data.
- * v2: `version=`, `mods=<comma list>`, `layout=added|kept`, `before=kept|none`, and
+ * v2: `version=`, `mods=<comma list>`, `layout=added|kept|removed` (removed: `am uninstall herdr.layout`
+ * took it out, and no install or update puts it back), `before=kept|none`, and
  * `adopted=<mod>:<path under automagik-herdr/>,…` for folders moved to backup/ on --adopt, and
  * `migrated=backup/<name>,…`, the rename migration's journals (oldest first) that a rollback across
  * the rename reverts, `installed=<ISO time>` when update.mjs last put the pack's folders in place
  * (the mod manager's INSTALLED column; am-mods/core.js parsePackMarker reads it too),
  * `sequence=<n>`, the signed pointer's sequence when the installed release came through it
- * (install.sh refuses an older pointer),
+ * (install.sh refuses an older pointer), `off=<mods>` in a kept set's .pack only: the folders it
+ * holds that were switched off (mods-disabled/) when kept, so a rollback puts them back off,
  * `usagemeter=<version>` when install.sh put the usagemeter binary in ~/.local/bin (--uninstall
  * removes only that one), `usagemeter-machines=<machine>:<version>,…` for the linked machines the
  * pack put it on (meterFleet.js), and `usagemeter-scope=all|local|none`, what the person chose
@@ -125,6 +127,7 @@ export function parseMarker(text) {
       .filter(([m, v]) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(m) && /^\d+\.\d+\.\d+$/.test(v))),
     usagemeterScope: ["all", "local", "none"].includes(get("usagemeter-scope")) ? get("usagemeter-scope") : null,
     sequence: /^\d{1,15}$/.test(get("sequence")) ? Number(get("sequence")) : null,
+    off: list(get("off")).filter((m) => /^[a-z0-9][a-z0-9-]*$/.test(m) && m !== POCKET_LINK),
   };
 }
 
@@ -132,13 +135,14 @@ export function parseMarker(text) {
 export const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 
 export const formatMarker = ({ version, mods, layout, before = "none", adopted = [], migrated = [], installed = null, sequence = null,
-  usagemeter = null, usagemeterOn = {}, usagemeterScope = null }) =>
+  usagemeter = null, usagemeterOn = {}, usagemeterScope = null, off = [] }) =>
   [`version=${version}`, `mods=${mods.join(",")}`, ...(layout ? [`layout=${layout}`] : []), `before=${before}`,
     ...(adopted.length ? [`adopted=${adopted.map((a) => `${a.mod}:${a.path}`).join(",")}`] : []),
     ...(migrated.length ? [`migrated=${migrated.join(",")}`] : []),
     ...(installed ? [`installed=${installed}`] : []),
     // sequence before the usagemeter lines, which install.sh writes last: a rewrite keeps the bytes.
     ...(Number.isSafeInteger(sequence) ? [`sequence=${sequence}`] : []),
+    ...(off?.length ? [`off=${off.join(",")}`] : []),
     ...(usagemeter ? [`usagemeter=${usagemeter}`] : []),
     ...(Object.keys(usagemeterOn ?? {}).length ? [`usagemeter-machines=${Object.entries(usagemeterOn).map(([m, v]) => `${m}:${v}`).join(",")}`] : []),
     ...(usagemeterScope ? [`usagemeter-scope=${usagemeterScope}`] : [])].join("\n") + "\n";

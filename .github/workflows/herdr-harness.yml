@@ -1,10 +1,13 @@
-name: Herdr find and raise
+name: Herdr find, raise and update
 
 # RFC 0013 delivery 1 (Decided 6): does code mode's start or raise work on every OS? On macOS
 # arm64, Ubuntu (under xvfb, with openbox as the window manager) and Windows: check herdrdev's
 # feed and the sha256 of the OS's build, install herdr-app with herdrdev's installer, then run
 # the app's finder and start-or-raise (apps/desktop/src/herdr.js) on a temp HERDR_APP_HOME:
-# status, ls, do space.new, and a raise from behind another window. The harness is
+# status, ls, do space.new, and a raise from behind another window. Delivery 2
+# (apps/desktop/src/herdr-update.js): an older build put back with herdrdev's installer, then
+# offline, the offer, no, and yes with the window open and closed, ending on the feed's
+# version. The harness is
 # apps/desktop/test/cross-os/herdr-harness.mjs; its table is the run summary and its JSON lines
 # an artifact. It runs on runners only, signs nothing, publishes nothing and uses no secrets.
 #
@@ -15,6 +18,7 @@ on:
   pull_request:
     paths:
       - apps/desktop/src/herdr.js
+      - apps/desktop/src/herdr-update.js
       - apps/desktop/test/cross-os/herdr-harness.mjs
       - .github/workflows/herdr-harness.yml
   workflow_dispatch:

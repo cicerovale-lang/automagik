@@ -153,17 +153,21 @@ function startDetached(file, args, { env, spawn = nodeSpawn }) {
   })
 }
 
+export const GRACE_MS = 1500
+
 /**
- * `status` until it exits 0, for up to `limit` ms. Only exit 2 (no window yet) keeps waiting:
- * any other answer stops at once with herdr-app's last stderr line (`failed` true).
+ * `status` until it exits 0, for up to `limit` ms. Exit 2 (no window yet) keeps waiting. Any
+ * other answer is borne for `grace` ms from the start (a window just started or restarted can
+ * answer 1 for a moment: the harness saw it on Linux), then stops the wait with herdr-app's
+ * last stderr line (`failed` true).
  */
-export async function waitOpen(bin, { env, execFile, limit = LIMIT_MS, every = 250, now = Date.now, sleep = defaultSleep } = {}) {
+export async function waitOpen(bin, { env, execFile, limit = LIMIT_MS, grace = GRACE_MS, every = 250, now = Date.now, sleep = defaultSleep } = {}) {
   const start = now()
   let last = { code: null, stderr: '' }
   for (;;) {
     last = await run(bin, ['status'], { env, execFile, timeout: Math.max(1000, limit - (now() - start)) })
     if (last.code === 0) return { ready: true, ms: now() - start }
-    if (last.code !== 2) return { ready: false, failed: true, ms: now() - start, code: last.code, stderr: lastLine(last.stderr) }
+    if (last.code !== 2 && now() - start >= grace) return { ready: false, failed: true, ms: now() - start, code: last.code, stderr: lastLine(last.stderr) }
     if (now() - start + every > limit) return { ready: false, ms: now() - start, code: last.code, stderr: lastLine(last.stderr) }
     await sleep(every)
   }
@@ -225,6 +229,14 @@ export async function openHerdr({ platform, arch, env, home, isFile, resolve, ex
     return { ok: false, reason: 'missing', message: 'Herdr is not set up' }
   }
   mark('found')
+  return raiseHerdr({ platform, found, env, execFile, spawn, now, sleep, limit, mark, log })
+}
+
+/**
+ * Steps 3 and 4 for a herdr-app already found: start or raise it, wait for its window, and
+ * look at what is in front. The same answers as openHerdr.
+ */
+export async function raiseHerdr({ platform, found, env, execFile, spawn, now, sleep, limit, mark = () => {}, log = () => {} }) {
   const launch = launchOf({ platform, found, env })
   const started = launch.detached
     ? await startDetached(launch.file, launch.args, { env, spawn })

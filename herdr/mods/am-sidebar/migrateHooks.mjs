@@ -112,13 +112,50 @@ function inPlace(text, edits) {
 export function toStable(appHome) {
   const home = appHome.replace(/\/+$/, "");
   const target = hookCommand(home);
-  const mine = new Set([...SIDEBARS.map((m) => `${home}/mods/${m}/briefing.mjs`), stableBriefingPath(home)]);
+  const mine = scriptsOf(home);
   return (command) => {
     if (!OURS.test(command) || command === target) return null;
     const script = scriptOf(command);
     if (script === null) return false;
     return mine.has(script) ? target : null;
   };
+}
+
+/** The briefing scripts a hook of this app home's pack runs: each sidebar folder's, and the stable entry point. */
+const scriptsOf = (home) => new Set([...SIDEBARS.map((m) => `${home}/mods/${m}/briefing.mjs`), stableBriefingPath(home)]);
+
+/** Whether `command` is a briefing hook of the pack's shape running one of this app home's scripts. */
+export function ownHook(appHome) {
+  const mine = scriptsOf(appHome.replace(/\/+$/, ""));
+  return (command) => typeof command === "string" && OURS.test(command) && mine.has(scriptOf(command));
+}
+
+/**
+ * A settings.local.json text without the UserPromptSubmit hooks `isMine(command)` names: a group
+ * left with no hook goes, then an empty UserPromptSubmit, then an empty `hooks`. Every other key
+ * and hook stays; the text is written back as 2-space JSON (the file is backed up first).
+ * Returns `{ text, removed }` (the same text when none was removed), or `{ error }`.
+ */
+export function withoutHooks(text, isMine) {
+  let settings;
+  try { settings = JSON.parse(text); } catch (e) { return { error: `not valid JSON (${why(e)})` }; }
+  if (!isObject(settings)) return { error: "not a JSON object" };
+  const list = isObject(settings.hooks) ? settings.hooks.UserPromptSubmit : undefined;
+  if (!Array.isArray(list)) return { text, removed: 0 };
+  let removed = 0;
+  const groups = [];
+  for (const group of list) {
+    if (!isObject(group) || !Array.isArray(group.hooks) || group.hooks.length === 0) { groups.push(group); continue; }
+    const kept = group.hooks.filter((h) => !(isObject(h) && isMine(h.command)));
+    removed += group.hooks.length - kept.length;
+    if (kept.length === group.hooks.length) groups.push(group);
+    else if (kept.length) groups.push({ ...group, hooks: kept });
+  }
+  if (!removed) return { text, removed: 0 };
+  if (groups.length) settings.hooks.UserPromptSubmit = groups;
+  else delete settings.hooks.UserPromptSubmit;
+  if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
+  return { text: json(settings), removed };
 }
 
 // ---- where the hooks are ----
@@ -417,6 +454,35 @@ export function revertHooks(projects, { appHome, git = runGit, also = [], log } 
   }
   if (entries.length) writeJournal(appHome, keep);
   return { restored, skipped };
+}
+
+/**
+ * The pack's uninstall (the herdr.am-sidebar part): every briefing hook of this app home's pack
+ * (ownHook) leaves the settings.local.json files where syncHooks looks (`projects`, their worktrees
+ * and subfolders, the `also` folders). Another app home's hook and a command of another shape stay.
+ * Each file is copied beside itself first (.am-backup…); one that can't be, a link, or a file that
+ * isn't JSON is left and reported. Returns `{ removed: string[], skipped: {file, reason}[] }`.
+ */
+export function removeHooks(projects, { appHome, git = runGit, also = [], log } = {}) {
+  appHome = resolve(appHome);
+  const isMine = ownHook(appHome);
+  const removed = [];
+  const skipped = [];
+  for (const folder of foldersOf(projects, { git, also, log })) {
+    const found = settingsOf(folder);
+    if (!found) continue;
+    let raw;
+    try { raw = readFileSync(found.file); } catch (e) { skipped.push({ file: found.file, reason: `unreadable (${why(e)}): left as it is` }); continue; }
+    if (found.skip) { if (OURS.test(raw.toString("utf8"))) skipped.push({ file: found.file, reason: found.skip }); continue; }
+    const r = withoutHooks(raw.toString("utf8"), isMine);
+    if (r.error) { if (OURS.test(raw.toString("utf8"))) skipped.push({ file: found.file, reason: `${r.error}: left as it is` }); continue; }
+    if (!r.removed) continue;
+    try { backupOf(found.file, raw); } catch (e) { skipped.push({ file: found.file, reason: `no backup could be made (${why(e)}): left as it is` }); continue; }
+    try { rewrite({ file: found.file, raw, text: r.text, mode: found.mode }); removed.push(found.file); } catch (e) {
+      skipped.push({ file: found.file, reason: `not rewritten (${why(e)}): left as it was` });
+    }
+  }
+  return { removed, skipped };
 }
 
 /**
