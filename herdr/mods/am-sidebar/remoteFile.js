@@ -13,9 +13,10 @@
 //   create   a shell there (exec on M): the folder made, then the file opened with noclobber
 //            (O_EXCL), so a file that appeared since the read is never replaced; a write that
 //            fails after that open removes the file it made.
-//   after    an edit or create whose answer was lost (a timeout, no readable answer; not one
-//            herdr-core refused before writing: the machine away or unknown, a bad call) may
-//            have landed there: the file is read again, and one that holds the new
+//   after    an edit or create whose answer was lost may have landed there. herdr-core has no
+//            timeout kind: a link that drops mid-call answers `unavailable`, as does the machine
+//            away, so that, a timeout, no readable answer or Herdr's exec rejecting all count
+//            as lost (only an unknown machine, a needed update or a bad call can't have written): the file is read again, and one that holds the new
 //            text is a success; else the state there is unknown, and the caller is told to check
 //            the file before retrying (a retried create would add the bot twice).
 //   remove   a shell there: the file removed only while it still holds the text read.
@@ -68,8 +69,9 @@ function errorOf(r) {
 }
 
 const away = (machine, why) => new RemoteFileError(`${machine} can't be reached: ${why}`, "unavailable");
-// herdr-core's refusals that come before anything is written there.
-const NOT_SENT = new Set(["unavailable", "machine_unknown", "needs_update", "invalid_params"]);
+// herdr-core's refusals that come before anything is written there (not `unavailable`: a link
+// that drops mid-call says that too).
+const NOT_SENT = new Set(["machine_unknown", "needs_update", "invalid_params"]);
 
 /** The file's text on `machine`, or null when there is no such file. Throws RemoteFileError. */
 export async function readRemoteText(io, machine, path) {
@@ -122,11 +124,11 @@ export async function writeRemoteText(io, machine, path, text, expected) {
   if (expected === "") throw new RemoteFileError(`${path} on ${machine} is empty; fix it by hand first`, "empty");
   let failure;
   if (expected === null) {
-    // shell() rejecting: the program never started there (Herdr's exec), nothing written.
-    const r = await shell(io, machine, CREATE_SH, [path, text]);
+    // Herdr's exec rejecting may be a link dropped mid-call: read back like any lost answer.
+    const r = await shell(io, machine, CREATE_SH, [path, text]).catch((e) => ({ code: -1, thrown: e }));
     if (r.code === 0) return null;
     if (r.code === STALE) throw new StaleSnapshot(`${path} appeared on ${machine} since it was read`);
-    const e = errorOf(r);
+    const e = r.thrown ? { kind: "unavailable", message: r.thrown.message } : errorOf(r);
     failure = new RemoteFileError(`${machine}: couldn't create ${path}: ${e.message}`, e.kind);
     // The script's own failure (exit 1, the file it made removed) or a refusal: not written.
     if (r.code > 0 || NOT_SENT.has(e.kind)) throw failure;

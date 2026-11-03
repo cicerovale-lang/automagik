@@ -261,7 +261,7 @@ automagik-herdr update [--check | --rollback]
   the project on linked machine M (`hc machine ls`), `--project` an absolute folder there, keyed
   there by the same rule. The file is read and written there through hc by the same
   compare-and-swap rule, and the `--json` answers carry `machine`. A write whose answer is lost
-  (a timeout) is read back: saved if the file holds it, else `State unknown`, so check the file
+  (a timeout, or the link dropping, which hc reports as `unavailable`) is read back: saved if the file holds it, else `State unknown`, so check the file
   before trying again. One write carries at most 96 KiB. Its panes aren't tracked from
   this computer yet (`status` is `unknown`), and the commands on panes refuse `--machine`.
 - A bot is named by its id or by its name. A refusal exits 1, a usage mistake (such as a

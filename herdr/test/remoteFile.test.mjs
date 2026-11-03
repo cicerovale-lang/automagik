@@ -89,9 +89,10 @@ test("create: folders made, the file written only when it isn't there", async (t
   symlinkSync(join(root, "elsewhere.json"), link);
   await assert.rejects(writeRemoteText(io, "vm", link, "x", null), StaleSnapshot);
   assert.equal(existsSync(join(root, "elsewhere.json")), false);
-  // The machine away: a failure, not stale.
+  // The machine away: a failure, not stale (it can't be told from a dropped link: State unknown).
   await assert.rejects(writeRemoteText(fakeIo({ down: true }), "vm", join(root, "z.json"), "x", null),
-    (e) => e instanceof RemoteFileError && !(e instanceof StaleSnapshot) && e.kind === "unavailable");
+    (e) => e instanceof RemoteFileError && !(e instanceof StaleSnapshot) && e.kind === "unknown_state");
+  assert.equal(existsSync(join(root, "z.json")), false);
 });
 
 test("replace: lands only while the file holds the text read; a change, a removal or the machine away is refused", async (t) => {
@@ -112,7 +113,7 @@ test("replace: lands only while the file holds the text read; a change, a remova
   await assert.rejects(writeRemoteText(io, "vm", path, "x\n", "{\"a\":3}\n"), (e) => e instanceof StaleSnapshot && /gone/.test(e.message));
   assert.equal(existsSync(path), false);
   writeFileSync(path, "{\"a\":3}\n");
-  await assert.rejects(writeRemoteText(fakeIo({ down: true }), "vm", path, "x\n", "{\"a\":3}\n"), (e) => !(e instanceof StaleSnapshot) && e.kind === "unavailable");
+  await assert.rejects(writeRemoteText(fakeIo({ down: true }), "vm", path, "x\n", "{\"a\":3}\n"), (e) => !(e instanceof StaleSnapshot) && e.kind === "unknown_state");
   assert.equal(readFileSync(path, "utf8"), "{\"a\":3}\n");
 });
 
@@ -137,10 +138,11 @@ test("remove: only while the file holds the text read, trailing newlines include
 });
 
 // An answer lost after the call went out: `land` runs the real call or not, then hc's timeout.
+// hc's real answer when the link drops mid-call: { kind: "unavailable" } (it has no timeout kind).
+const dropped = JSON.stringify({ error: { kind: "unavailable", message: "vm stopped answering" } });
 const lost = (io, land) => ({
-  hc: async (args) => { if (land) await io.hc(args); return { code: 1, stdout: "", stderr: "hc: timed out waiting for vm" }; },
-  exec: async (command, args, machine) => { if (land) await io.exec(command, args, machine); return { code: -1, stdout: "", stderr: "timed out after 60 s" }; },
-  read: io,
+  hc: async (args) => { if (land) await io.hc(args); return { code: 1, stdout: "", stderr: dropped }; },
+  exec: async (command, args, machine) => { if (land) await io.exec(command, args, machine); return { code: -1, stdout: "", stderr: dropped }; },
 });
 const withRead = (l, io) => ({ hc: async (args) => (args[1] === "read" ? io.hc(args) : l.hc(args)), exec: l.exec });
 
@@ -162,12 +164,34 @@ test("an edit or create whose answer was lost and that didn't land: State unknow
     (e) => e.kind === "unknown_state" && /^State unknown: .*check .*bots\.json on vm before trying again/.test(e.message));
   writeFileSync(path, "old\n");
   await assert.rejects(writeRemoteText(withRead(lost(io, false), io), "vm", path, "new\n", "old\n"), (e) => e.kind === "unknown_state");
-  // A refusal before anything was written stays a plain failure, never "unknown".
-  await assert.rejects(writeRemoteText(fakeIo({ down: true }), "vm", path, "new\n", "old\n"), (e) => e.kind === "unavailable");
+  // Only a refusal that can't have written (an unknown machine) stays a plain failure.
+  await assert.rejects(writeRemoteText(fakeIo(), "nosuch", path, "new\n", "old\n"), (e) => e.kind === "machine_unknown");
+  // Herdr's exec rejecting after the create landed: read back, saved.
+  const io2 = fakeIo();
+  const rejectsAfter = { hc: io2.hc, exec: async (c, a, m) => { await io2.exec(c, a, m); throw new Error("vm is unreachable"); } };
+  const fresh = join(root, "fresh.json");
+  await writeRemoteText(rejectsAfter, "vm", fresh, "x\n", null);
+  assert.equal(readFileSync(fresh, "utf8"), "x\n");
 });
 
-test("create: a folder it can't write leaves no file and is a failure, not stale", async (t) => {
+test("create: a write that fails after the exclusive open removes the file it made, a failure, not stale", async (t) => {
   const root = scratch(t);
+  // bash with its printf builtin off and a printf that fails first on PATH: the open succeeds,
+  // the write fails.
+  const shim = join(root, "shim");
+  execFileSync("mkdir", ["-p", shim]);
+  writeFileSync(join(shim, "printf"), "#!/bin/sh\nexit 1\n");
+  execFileSync("chmod", ["755", join(shim, "printf")]);
+  const failing = {
+    hc: fakeIo().hc,
+    exec: (command, args) => new Promise((done) => execFile("bash", ["-c", `enable -n printf; ${args[1]}`, ...args.slice(2)],
+      { env: { ...process.env, PATH: `${shim}:${process.env.PATH}` } },
+      (err, stdout, stderr) => done({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, stdout, stderr }))),
+  };
+  const path = join(root, "proj/.herdr/bots.json");
+  await assert.rejects(writeRemoteText(failing, "vm", path, "x\n", null), (e) => !(e instanceof StaleSnapshot) && e.kind !== "unknown_state");
+  assert.equal(existsSync(path), false, "no empty or partial bots.json left");
+  // A folder it can't write: no file either.
   const dir = join(root, "ro");
   execFileSync("mkdir", ["-p", dir]);
   execFileSync("chmod", ["555", dir]);

@@ -183,3 +183,11 @@ test("--machine: git there getting no answer is 'can't be reached', never 'not i
   assert.match(r.err, /vm can't be reached: vm stopped answering/);
   assert.equal(existsSync(s.botsPath), false);
 });
+
+test("--machine: a create that landed there before the link dropped is reported saved, once", (t) => {
+  const s = scene(t);
+  s.setState((st) => { st.loseExecAnswer = "sh"; });
+  const r = s.cli(["create", ...s.on, "--name", "Hedge", "--agent", "claude"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(s.bots().bots.map((b) => b.name), ["Hedge"]);
+});
