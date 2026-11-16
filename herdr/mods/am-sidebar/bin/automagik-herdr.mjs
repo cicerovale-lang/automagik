@@ -46,7 +46,7 @@ import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal,
   isPaneIdle, pendingDialog, paneCommand, planText as restartText, restartAnswer, restartPlan, sharedFresh, claudeSlug, claudeTranscriptPath, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders } from "../restart.js";
 import { BORN_SLACK_MS, FIRST_SESSION_MS, PLIST_LABEL, SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir,
   countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, kimiCandidates, kimiHomeOf, kimiIndexPath, launchdNotLoaded, ledgerRivals,
-  lastText, pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets, sameBoot, servicePath, sweptSince, unitIsOurs, unitKeepsPath, unitPath, unitText, uuidV7Ms } from "../revive.js";
+  lastText, pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveRestartArgs, reviveTargets, sameBoot, servicePath, sweptSince, unitIsOurs, unitKeepsPath, unitPath, unitText, uuidV7Ms } from "../revive.js";
 import { autoStatus, readAuto, binDirOf, checkForUpdate, defaultModsDir, installUpdate, liveHome, managedPack, readMarker, relinkCli, rollback as rollbackPack, stateDirOf, writeAuto, writeMarker } from "../update.mjs";
 import { NO_UPDATE_ENV, PACK_NAME, POCKET_LINK, heldModLine, updatesOff } from "../release.js";
 import { MACHINE_NAME, OPT_IN, decodeExec, hcExecArgs, installOn, linkedMachines, meterScope, recordAfter, resultLine, uninstallOn } from "../meterFleet.js";
@@ -56,7 +56,7 @@ import { SHARED_RENAMES, renamedFrom } from "../migrate.js";
 import { transcriptShape } from "../transcriptFolder.mjs";
 import { REMOTE_TEXT_MAX, RemoteFileError, StaleSnapshot, readRemoteText, removeRemoteText, utf8Length, writeRemoteText } from "../remoteFile.js";
 import { botHistory, historyLines } from "../inspect.js";
-import { CONFIG_VAR, chooseLogin } from "../logins.js";
+import { CONFIG_VAR, agentHomeFor, agentHomeProblem, agentHomeVar, chooseLogin } from "../logins.js";
 import { DocError, docGet } from "../docGet.mjs";
 import { isGuardFolder } from "../hcGuard.mjs";
 import { isInstalledGuardFolder } from "../hcGuard.mjs";
@@ -279,6 +279,29 @@ function claudeLogin(argv, warnings = []) {
   if (chosen.warning) warnings.push(chosen.warning);
   return chosen.words;
 }
+/**
+ * The --agent-home folder from `opts`: null when the flag is absent, the folder when it is an
+ * absolute existing directory, and a CliError that stops the launch otherwise. The agent's
+ * vendor variable is checked later, once the launch's agent is known.
+ */
+function agentHomeOf(opts) {
+  if (opts["agent-home"] === undefined) return null;
+  const why = agentHomeProblem(opts["agent-home"], { isDir });
+  if (why) throw new CliError(`--agent-home ${String(opts["agent-home"]).slice(0, 200)}: ${why}.`, 2);
+  return opts["agent-home"];
+}
+
+/** The env words --agent-home puts on a launch of `agent`, or a refusal when this pack sets no vendor variable for it. */
+function agentHomeLogin(agentHome, agent, agents = agentTable()) {
+  if (agentHome === null) return null;
+  const checked = agentHomeFor(agent, agentHome, { isDir });
+  if (checked.error) {
+    const who = agent ? (agents[agent]?.name ?? agent) : "this launch's agent";
+    throw new CliError(`--agent-home: ${who} ${checked.error}.`, 2);
+  }
+  return checked.words;
+}
+
 const modelIo = () => ({ home: home(), appHome: appHome(), read: (p) => { try { return readText(p); } catch { return null; } } });
 /** The agents Herdr can start: its shipped table with the app home's programs.json applied. */
 const agentTable = () => withOverrides(readText(`${appHome()}/programs.json`));
@@ -1642,7 +1665,7 @@ const OPTIONS = {
   title: { type: "string" }, sub: { type: "string" }, id: { type: "string" },
   check: { type: "boolean" }, rollback: { type: "boolean" }, "retry-skipped": { type: "boolean" }, auto: { type: "string" },
   "worker-agent": { type: "string" }, "worker-model": { type: "string" }, "worker-effort": { type: "string" },
-  "worker-template": { type: "string" }, template: { type: "string" },
+  "worker-template": { type: "string" }, template: { type: "string" }, "agent-home": { type: "string" },
   branch: { type: "string" }, worktree: { type: "string" }, base: { type: "string" }, effort: { type: "string" }, tier: { type: "string" },
   task: { type: "string" }, bot: { type: "string" }, move: { type: "boolean" },
   queued: { type: "boolean" }, cancel: { type: "boolean" }, "run-queued": { type: "string" },
@@ -1728,7 +1751,7 @@ Usage: am <command> [options]                   (every command takes --json and 
   category ls | add --title T [--sub S] [--id ID] | edit <id> [--title T] [--sub S]
            | rm <id> | order <id>...
   start <bot> [--space ID] [--tab ID]   a new pane on this computer (prints its terminal)
-  revive [--dry-run] [--boot] [--wait SECONDS] | revive --last
+  revive [--dry-run] [--boot] [--wait SECONDS] [--agent-home DIR] | revive --last
                                 after a restart of this computer: every bot the attach ledger
                                 binds here whose pane is gone, or is the bare shell herdr-core
                                 keeps in a pane whose program ended, is restarted in its place
@@ -1766,7 +1789,7 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 write the file in time is reported, not restarted. --dry-run
                                 prints the plan and touches nothing; --all covers this CLI's
                                 remembered projects. A timer or the login service runs the pass.
-  restart <bot> [--fresh] [--agent A] [--model M [--save]] [--tree [--fresh-shared]] [--force] [--cwd DIR]
+  restart <bot> [--fresh] [--agent A] [--model M [--save]] [--tree [--fresh-shared]] [--force] [--cwd DIR] [--agent-home DIR]
                                 the bot's agent again in its pane's place (same space and tab,
                                 same folder, labels kept), launched from its current source
                                 (a live hc template's current command, else the definition's
@@ -1843,12 +1866,17 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 is gone, with a note when the command succeeds
   worker "<task>" (--branch B [--base REF] | --worktree DIR)
          [[--agent A] [--model M] [--effort E] | --template T] [--name N]
-         [--role dev|test|review|fix] [--task ID [--lead BOT]]
+         [--role dev|test|review|fix] [--task ID [--lead BOT]] [--agent-home DIR]
                                 from a bot's pane: start one worker for the task, an hc
                                 child of the bot in the task's worktree (prints its terminal);
                                 --template runs an hc template, alone; --role defaults from
                                 the bot's rank (tester: test, reviewer: review, fixer: fix,
                                 else dev). One writer (dev, test, fix) per worktree, any bot;
+                                --agent-home DIR: the agent's login home, through its vendor
+                                config variable (Claude: CLAUDE_CONFIG_DIR, Codex:
+                                CODEX_HOME); DIR must be absolute and an existing folder, or
+                                nothing starts. restart takes the same flag, and revive
+                                passes it to each restart; --tree helpers keep their homes.
                                 reviewers run alongside. --task: Genie's short id (gl-231);
                                 the worker is named <id>-<role>, a --branch must contain the
                                 id, and --lead (default: this bot; a reviewer or fixer must
@@ -4660,6 +4688,7 @@ const seatJson = (bot, seat) => ({ id: bot.id, terminal: seat.terminal, parent: 
 async function launchSeat(project, bot, over = {}) {
   const { file, key } = project;
   const agentKey = over.agent ?? bot.agent;
+  const agentHome = over.agentHome ?? null;
   const model = over.argv ? (over.model ?? null) : bot.model;
   // A12: a pin that isn't one of the agent's listed models (an old free-text model) is refused.
   if (!over.argv && bot.model && !modelList(bot.agent, bot.model).includes(bot.model)) {
@@ -4723,8 +4752,10 @@ async function launchSeat(project, bot, over = {}) {
     place = spaceOnly(await windowPlace(key, await placementOf(key, seen), seen));
   }
   // The Claude login this launch uses (#453): read from claude-logins.json now, Claude only.
-  const login = over.login?.words ?? claudeLogin(argv, briefed.warnings);
-  if (over.login) briefed.warnings.push(...over.login.warnings);
+  // A restart's --agent-home replaces that choice with its one vendor assignment (#1208).
+  const login = agentHome !== null ? (over.agentHomeLoginWords ?? agentHomeLogin(agentHome, agentKey, agentTable()))
+    : over.login?.words ?? claudeLogin(argv, briefed.warnings);
+  if (agentHome === null && over.login) briefed.warnings.push(...over.login.warnings);
   const proxyOn = agentKey === "dsh-tui" && proxyEnabled(
     approvedProxyState({ project: key, bot }), process.platform,
     (warning) => briefed.warnings.push(warning));
@@ -6165,7 +6196,7 @@ async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recover
     const e = { id: queueId, botId: bot.id, botName: bot.name, project: key, terminal: old.address, created_ms: old.created_ms ?? null,
       reason: opts.handoff ? "due" : dialog ? "blocked" : "working", dialog, options: { fresh: Boolean(opts.fresh), agent: opts.agent ?? null,
         model: opts.model ?? null, save: Boolean(opts.save), tree: Boolean(opts.tree), freshShared: Boolean(opts["fresh-shared"]),
-        cwd: wanted ?? null, space: opts.space ?? null, tab: opts.tab ?? null,
+        cwd: wanted ?? null, space: opts.space ?? null, tab: opts.tab ?? null, "agent-home": opts["agent-home"] ?? null,
         ...(opts.handoff ? { handoff: true, contextTokens: opts.contextTokens ?? null, restartAt: opts.restartAt ?? null } : {}),
         ...(recovered ? { recoveredHome: true } : {}) }, watcher: null, at: new Date().toISOString() };
     // Persist before starting: the detached process may read immediately, then takes this lock.
@@ -6966,11 +6997,15 @@ function adoptedLogin(old, argv, keep) {
 
 async function cmdRestart(opts, [ref]) {
   if (opts["run-queued"]) return runQueuedRestart(opts);
+  if ((opts.queued || opts.cancel || opts.due) && opts["agent-home"] !== undefined) {
+    throw new CliError("--agent-home goes with a restart, not a queue listing, a cancel or a due pass.", 2);
+  }
   if (opts.due) {
     if (ref) throw new CliError("restart --due takes no bot: it lists every seat over its threshold, or take one with am restart <bot>.", 2);
     return cmdRestartDue(opts);
   }
   if (opts.queued || opts.cancel) return queuedRestarts(opts, ref);
+  const agentHome = agentHomeOf(opts);
   if (opts.tab && !opts.space) throw new CliError("--tab needs --space (the space that tab is in).", 2);
   const swap = opts.agent !== undefined || opts.model !== undefined;
   if (opts.save && !swap) throw new CliError("--save keeps a swap in the bot's definition; it goes with --agent or --model.", 2);
@@ -6994,6 +7029,9 @@ async function cmdRestart(opts, [ref]) {
   if (why) throw new CliError(why);
   // Before swap validation, preparation or a delegated tree transaction.
   refuseLinkedCaller(project);
+  if (project.machine && agentHome !== null) {
+    throw new CliError("--agent-home is for a launch on this computer; a restart on a linked machine keeps its own agent home.", 2);
+  }
   if (project.machine && opts.tree) return restartTreeOnMachine(opts, project, bot);
   if (project.machine) {
     // Observe before swap/model validation can refresh a caller-side model cache.
@@ -7149,6 +7187,7 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
     newSession: newSessionId(),
   };
   let plan = restartPlan(planned);
+  const agentHomeLoginWords = agentHomeLogin(agentHome, plan.agent, agents);
   if (old && !opts.force && !isPaneIdle(old, screen)
     && (["working", "blocked"].includes(old.status?.state) || pendingDialog(screen))) {
     await recheck(plan.argv);
@@ -7215,7 +7254,7 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
   }
   let seat = await launchSeat(project, bot, { agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place,
     carry: { ...carry, ...(plan.sessionId ? { [SESSION_LABEL]: plan.sessionId } : {}) }, session: sessionOfPlan(plan, resumeId),
-    replacing: old ? held.binding : null, granted: plan.granted, login });
+    replacing: old ? held.binding : null, granted: plan.granted, login, agentHome, agentHomeLoginWords });
   if (seat.running) return opts.json ? { id: bot.id, running: seat.running } : `${bot.name} is already running in ${seat.running}.`;
   // A direct restart supersedes a queued one only once it really started: its watcher must not
   // start a second replacement while this one hands the bot over.
@@ -9123,7 +9162,11 @@ async function sendFirstTask(address, task, run) {
 
 async function cmdWorker(opts, rest) {
   // `worker kill <pane>`: a task call always names --branch or --worktree, so the two never mix.
-  if (rest[0] === "kill" && opts.branch === undefined && opts.worktree === undefined) return cmdWorkerKill(opts, rest.slice(1));
+  if (rest[0] === "kill" && opts.branch === undefined && opts.worktree === undefined) {
+    if (opts["agent-home"] !== undefined) throw new CliError("--agent-home goes with a worker's launch, not worker kill.", 2);
+    return cmdWorkerKill(opts, rest.slice(1));
+  }
+  const agentHome = agentHomeOf(opts);
   const task = rest.join(" ").trim();
   if (!task) throw new CliError('worker needs the task text: am worker "<task>" --branch <name>.', 2);
   // #1278 cause 5: the worker is sent back with a clean worktree, so the sweep never has to
@@ -9220,6 +9263,8 @@ async function cmdWorker(opts, rest) {
     const list = plan.model ? modelList(plan.agent, plan.model) : [];
     if (list.length && !list.includes(plan.model)) warnings.push(`${plan.model} isn't on ${plan.agent}'s model list; started with it anyway.`);
   }
+  // --agent-home: the vendor config folder that agent's CLI reads; every other launch word stays as it was.
+  const agentHomeLoginWords = agentHomeLogin(agentHome, runs, agents);
   // Where it works: --worktree's, the branch's worktree, or the folder a new one gets (made
   // below, once the check passes). Nothing is made yet.
   let place = opts.worktree !== undefined ? await givenWorktree(opts.worktree, project.key, bot)
@@ -9370,7 +9415,7 @@ async function cmdWorker(opts, rest) {
     const args = workerArgs({ botId: bot.id, branch: place.branch, role, name, cwd: place.worktree, parent: me.address, space,
       agent: plan.agent, model: plan.model, effort: plan.effort, agyMode: plan.agyMode, argv: workerArgv, session, task: prompt, template: plan.template,
       templateArgv,
-      login: claudeLogin(templateArgv ?? plan.argv ?? [], warnings),
+      login: agentHomeLoginWords ?? claudeLogin(templateArgv ?? plan.argv ?? [], warnings),
       path: runPath?.path ?? process.env.PATH, taskId, project: project.key, lead,
       agySettingsPath: agySettings && !templateArgv ? agySettings.path : null,
       // #955: the proxy matches a worker's `hc kill` shim as the stable folder's copy.
@@ -9604,7 +9649,7 @@ const REVIVE_RESTART_MS = Number(process.env.AUTOMAGIK_HERDR_REVIVE_RESTART_MS) 
 const REVIVE_SETTLE_MS = process.env.AUTOMAGIK_HERDR_REVIVE_SETTLE_MS !== undefined ? Number(process.env.AUTOMAGIK_HERDR_REVIVE_SETTLE_MS) || 0 : 20_000;
 const reviveStampPath = () => join(appHome(), "automagik-herdr", "revive-boot.json");
 const reviveReportPath = () => join(appHome(), "automagik-herdr", "revive-last.json");
-const REVIVE_USAGE = "usage: am revive [--dry-run] [--boot] [--wait SECONDS] [--json] | revive --last [--json] | revive service install|uninstall|status";
+const REVIVE_USAGE = "usage: am revive [--dry-run] [--boot] [--wait SECONDS] [--agent-home DIR] [--json] | revive --last [--json] | revive service install|uninstall|status";
 
 /** Waits until herdr-core answers (`hc server status`), up to `seconds`; a CliError when it doesn't. */
 async function coreUp(seconds) {
@@ -9635,8 +9680,8 @@ const firstSentence = (text) => { const t = String(text ?? "").trim().replace(/^
  * the refusal says a new conversation is the way. Resolves { outcome: "resumed" | "fresh" |
  * "failed" | "running", why, terminal, helpers }.
  */
-async function reviveOne(target, bot) {
-  const args = ["restart", bot.id, "--project", target.project, "--tree", "--revive", "--json"];
+async function reviveOne(target, bot, agentHome = null) {
+  const args = reviveRestartArgs({ botId: bot.id, project: target.project, agentHome });
   const read = (r) => { let out = null; try { out = JSON.parse(r.stdout); } catch { out = null; } return { code: r.code, out, err: r.stderr, killed: r.killed === true }; };
   const helpersOfAnswer = (out) => (Array.isArray(out?.helpers) ? out.helpers : []).map((h) => ({ name: h.name ?? h.replaced, bot: h.bot ?? null,
     outcome: !h.up ? "failed" : h.mode === "resume" ? "resumed" : "fresh", why: !h.up ? firstSentence(h.error) : h.note ?? null }));
@@ -9651,7 +9696,7 @@ async function reviveOne(target, bot) {
   if (first.killed) return { outcome: "failed", terminal: null, why: `its restart gave no answer in ${REVIVE_RESTART_MS / 1000}s`, helpers: [] };
   const refusal = restartAnswer({ code: first.code || 1, out: first.out, err: first.err });
   if (!refusal.freshable) return { outcome: "failed", terminal: null, why: firstSentence(refusal.refused), helpers: [] };
-  const again = read(await runSelf([...args, "--fresh"]));
+  const again = read(await runSelf(reviveRestartArgs({ botId: bot.id, project: target.project, agentHome, fresh: true })));
   if (back(again)) return done(again.out, `its conversation couldn't be resumed (${firstSentence(refusal.refused)})`);
   if (again.out?.running) return { outcome: "running", terminal: again.out.running, why: null, helpers: [] };
   return { outcome: "failed", terminal: null, helpers: [],
@@ -9666,9 +9711,13 @@ async function reviveOne(target, bot) {
  * plan, nothing touched. --wait S: waits that long for herdr-core first.
  */
 async function cmdRevive(opts, [verb, sub, ...more]) {
+  if (opts["agent-home"] !== undefined && (opts.last || verb === "service")) {
+    throw new CliError("--agent-home goes with a revive pass, not --last or revive service.", 2);
+  }
   if (opts.last) return reviveLast(opts, verb);
   if (verb === "service") return reviveService(opts, sub, more);
   if (verb) throw new CliError(REVIVE_USAGE, 2);
+  const agentHome = agentHomeOf(opts);
   const wait = opts.wait === undefined ? 0 : Number(opts.wait);
   if (!Number.isFinite(wait) || wait < 0 || wait > 86_400) throw new CliError("--wait takes seconds, 0 to 86400.", 2);
   const dry = Boolean(opts["dry-run"]);
@@ -9680,13 +9729,13 @@ async function cmdRevive(opts, [verb, sub, ...more]) {
     if (sameBoot(ran, bootMs)) return opts.json ? { ran: false, reason: "already ran for this boot" } : "revive already ran for this boot; run am revive to look again.";
   }
   const projects = new Map();
-  if (dry) return revivePass(opts, { wait, dry, bootMs, projects });
+  if (dry) return revivePass(opts, { wait, dry, bootMs, projects, agentHome });
   // #1419: a pass that stops early is recorded too (never stamped), and its error stands.
-  try { return await revivePass(opts, { wait, dry, bootMs, projects }); } catch (e) { keepStopped(e, opts, bootMs, projects); throw e; }
+  try { return await revivePass(opts, { wait, dry, bootMs, projects, agentHome }); } catch (e) { keepStopped(e, opts, bootMs, projects); throw e; }
 }
 
 /** cmdRevive's pass, from herdr-core's wait to the reports; `projects` is cmdRevive's, so a pass that stops early is recorded with what it knew. */
-async function revivePass(opts, { wait, dry, bootMs, projects }) {
+async function revivePass(opts, { wait, dry, bootMs, projects, agentHome = null }) {
   await coreUp(wait);
   const core = await coreId();
   const look = async () => {
@@ -9724,6 +9773,7 @@ async function revivePass(opts, { wait, dry, bootMs, projects }) {
     const bot = botOf(t);
     const why = !t.project ? "its attach row names no project" : !projectOfKey(t.project).file ? `${t.project} has no ${BOTS_PATH} that can be read`
       : !bot ? `${BOTS_PATH} no longer defines it` : bot.planned ? "it is planned, not started"
+      : agentHome !== null && !agentHomeVar(bot.agent) ? `its agent (${bot.agent}) has no vendor config folder for --agent-home`
         : me && [t.terminal, states.get(t.terminal)?.get?.name].includes(me) ? "revive runs inside its pane; run it from another terminal" : null;
     return { ...t, name: nameOf(t), bot: t.bot, def: bot, refuse: why, via: parentTarget(t) };
   });
@@ -9762,7 +9812,7 @@ async function revivePass(opts, { wait, dry, bootMs, projects }) {
     const results = projectOfKey(p.project).results;
     if (p.refuse) { results.push({ name: p.name, bot: p.bot, outcome: p.def ? "skipped" : "failed", why: p.refuse, terminal: null, helpers: [] }); continue; }
     if (p.via) continue; // its parent's --tree brings it back; said there
-    const r = await reviveOne(p, p.def);
+    const r = await reviveOne(p, p.def, agentHome);
     for (const h of r.helpers) if (h.bot) helped.set(`${p.project}\n${h.bot}`, h);
     if (r.outcome !== "running") results.push({ name: p.name, bot: p.bot, ...r });
   }
@@ -10510,6 +10560,9 @@ export async function main(argv = process.argv.slice(2), io = {}) {
   if (!run) { process.stderr.write(`am: unknown command "${command}"\n\n${USAGE}\n`); return 2; }
   try {
     if (command === "main") checkMainArgs(rest, tokens);
+    if (opts["agent-home"] !== undefined && !["worker", "restart", "revive"].includes(command)) {
+      throw new CliError("--agent-home goes with worker, restart or revive.", 2);
+    }
     if (NEEDS_BOT.has(command) && !rest[0] && !(command === "restart" && (opts.queued || opts["run-queued"] || opts.due))) throw new CliError(`${command} needs a bot (its id or name).`, 2);
     if (opts.machine !== undefined && !ON_MACHINE.has(command)) {
       throw new CliError(`${command} works on this computer only for now; --machine goes with ls, show, create, edit, main, rm, category, start, restart, attach, detach, whois, history, meter, machines and doc.`, 2);
