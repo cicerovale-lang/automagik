@@ -22,5 +22,15 @@ jobs:
         with:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile && bun run harness
-      - name: Verify the two corrected upload handles on macOS
-        run: node --import ./test/harness-resolve.mjs --test --test-name-pattern="^the complete handle for" test/group-uploads.test.js
+      - name: Verify native session-file consent on macOS
+        env:
+          AUTOMAGIK_REQUIRE_SESSION_FILE_TEST: '1'
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TEMP/issue-1715-tools"
+          npm install --prefix "$prefix" --no-audit --no-fund @openai/codex@0.167.1 @agentclientprotocol/codex-acp@2.8.0
+          export AUTOMAGIK_TEST_CODEX="$prefix/node_modules/@openai/codex-darwin-x64/vendor/x86_64-apple-darwin/bin/codex"
+          export AUTOMAGIK_TEST_CODEX_ACP="$prefix/node_modules/@agentclientprotocol/codex-acp/dist/index.js"
+          test -x "$AUTOMAGIK_TEST_CODEX"
+          test -f "$AUTOMAGIK_TEST_CODEX_ACP"
+          node --import ./test/harness-resolve.mjs --test test/session-files-native.test.js
