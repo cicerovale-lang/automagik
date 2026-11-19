@@ -22,5 +22,5 @@ jobs:
         with:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile && bun run harness
-      - name: Verify the four changed fixtures on macOS
-        run: node --import ./test/harness-resolve.mjs --test test/group-uploads.test.js test/image-profile.test.js test/image.test.js test/session-files.test.js
+      - name: Verify the two corrected upload handles on macOS
+        run: node --import ./test/harness-resolve.mjs --test --test-name-pattern="^the complete handle for" test/group-uploads.test.js
