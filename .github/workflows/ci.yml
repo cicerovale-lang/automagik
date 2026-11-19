@@ -398,8 +398,9 @@ jobs:
     # folders still waiting on issue #795 are listed in its `pending` entries.
     name: Privacy (whole repository)
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 1
     steps:
+      - run: sleep 150
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
