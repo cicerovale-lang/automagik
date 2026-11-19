@@ -1,0 +1,64 @@
+name: Verify issue 932 candidate on Linux
+
+on:
+  push:
+    branches:
+      - verify/issue-932-agy-t1by
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.repository == 'cicerovale-lang/automagik'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUST_TOOLCHAIN: 1.93.0
+      CARGO_BUILD_JOBS: 4
+    defaults:
+      run:
+        working-directory: meter/usagemeter
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --component rustfmt
+          rustup default "${RUST_TOOLCHAIN}"
+          cargo --version
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Changed cursor reread regression
+        run: cargo test --locked --test agy a_quiet_row_with_a_missing_step_counts_with_the_times_present -- --exact
+
+      - name: Held row reread regression
+        run: cargo test --locked --test agy a_late_step_behind_a_held_row_does_not_count_again -- --exact
+
+      - name: Build and install candidate into temporary prefix
+        run: |
+          set -euo pipefail
+          cargo build --locked --bin usagemeter
+          case "$(uname -m)" in
+            x86_64) asset=usagemeter-linux-x86_64 ;;
+            aarch64) asset=usagemeter-linux-aarch64 ;;
+            *) echo "::error::unsupported Linux architecture"; exit 1 ;;
+          esac
+          release="$RUNNER_TEMP/verify-932-release/latest/download"
+          prefix="$RUNNER_TEMP/verify-932-prefix"
+          mkdir -p "$release" "$prefix"
+          cp target/debug/usagemeter "$release/$asset"
+          (cd "$release" && sha256sum "$asset" > SHA256SUMS)
+          HOME="$prefix" USAGEMETER_BASE_URL="file://$RUNNER_TEMP/verify-932-release" sh install.sh
+          installed="$prefix/.local/bin/usagemeter"
+          test -x "$installed"
+          cmp target/debug/usagemeter "$installed"
+          printf 'VERIFY_932_INSTALLED_BIN=%s\n' "$installed" >> "$GITHUB_ENV"
+
+      - name: Installed candidate sync on both reread paths
+        run: cargo test --locked --test agy verify_932_installed_sync_rereads -- --exact --nocapture

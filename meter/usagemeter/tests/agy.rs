@@ -1112,6 +1112,8 @@ fn a_late_step_behind_a_held_row_does_not_count_again() {
     );
 }
 
+include!("verify932_cli.inc");
+
 #[test]
 fn a_quiet_row_with_no_step_time_is_unsupported() {
     use std::time::{Duration, SystemTime};
