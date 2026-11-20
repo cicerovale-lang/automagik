@@ -314,6 +314,7 @@ async function main() {
   const blockedGate = await jsonHealth(gateName, false)
   check(blockedGate.reason === 'gate-view-tampered' && blockedGate.gate.status === 503,
     'gate did not report view tampering and refuse requests')
+  await docker(['exec', gateName, '/nodejs/bin/node', '-e', claimBoundary])
   await execDsh(`
     const assert = require('node:assert/strict')
     const fs = require('node:fs')
@@ -326,7 +327,7 @@ async function main() {
   const recoveringGate = await jsonHealth(gateName, false)
   check(recoveringGate.followsImage, 'gate did not see the restored profile state')
   check(recoveringGate.gate.status === 503, 'gate answered before a new launch URL was published')
-  say('view tampering: both health checks fail and the gate refuses until the next DSH launch')
+  say('view tampering: claim stays open and proxy traffic is refused until the next DSH launch')
   await docker(['rm', '--force', gateName])
   await docker(['exec', name, '/nodejs/bin/node', '-e', `
     const fs = require('node:fs')

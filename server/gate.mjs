@@ -9,6 +9,7 @@ export const CLOUD_OPEN_PATH = '/_gate/cloud/open'
 export const CLOUD_RENEW_PATH = '/_gate/cloud/renew'
 export const CLOUD_REVOCATION_PATH = '/_gate/cloud/revocation'
 const VIEW_UNAVAILABLE = { error: 'Gate unavailable' }
+const VIEW_UNAVAILABLE_BODY = JSON.stringify(VIEW_UNAVAILABLE)
 const MAX_OPEN_BODY = 4096
 const MAX_RENEW_BODY = 4096
 const MAX_REVOCATION_BODY = 4096
@@ -97,6 +98,35 @@ export function createGate({
 }) {
   const origin = pinOrigin(value)
   const sockets = new Map()
+  const streams = new Set()
+  function proxyReady() {
+    if (!viewReady || viewReady()) return true
+    for (const stop of streams) stop()
+    for (const { socket, proxy, upstream } of sockets.values()) {
+      socket.destroy()
+      proxy.destroy()
+      upstream?.destroy()
+    }
+    return false
+  }
+  function refuseHttpProxy(res) {
+    if (proxyReady()) return false
+    answer(res, 503, VIEW_UNAVAILABLE)
+    return true
+  }
+  function refuseSocketProxy(socket) {
+    if (proxyReady()) return false
+    refuseSocket(socket, 503, VIEW_UNAVAILABLE_BODY)
+    return true
+  }
+  function trackStream(res, proxy) {
+    const stop = () => { res.destroy(); proxy.destroy() }
+    streams.add(stop)
+    res.on('close', () => {
+      streams.delete(stop)
+      proxy.destroy()
+    })
+  }
   // Cloud mode: the rail posts a single-use open code here, as a form (OIDC's form_post shape).
   // The gate trades it with the Cloud service itself and sets its own session; the browser
   // never sees a workspace token, and a code or token in a URL is refused.
@@ -228,8 +258,9 @@ export function createGate({
   // their own. A self-hosted instance has one human, so it keeps every session in scope.
   const mine = family => cloud ? other => samePerson(other.principal, family.principal) : undefined
   const server = http.createServer(async (req, res) => {
-    if (viewReady && !viewReady()) { answer(res, 503, VIEW_UNAVAILABLE); return }
     if (reservedPathAlias(req.url, origin)) { answer(res, 400, { error: 'Non-canonical gate path' }); return }
+    const local = req.url.startsWith('/_gate/')
+    if (!local && refuseHttpProxy(res)) return
     if (cloud && req.url === CLOUD_REVOCATION_PATH) { await cloudRevoke(req, res); return }
     if (cloud && req.url === CLOUD_RENEW_PATH) { await cloudRenew(req, res); return }
     if (cloud && req.url.split('?', 1)[0] === CLOUD_OPEN_PATH) { await cloudOpen(req, res); return }
@@ -245,6 +276,7 @@ export function createGate({
       }
       try {
         const cookie = await credentials.cookie()
+        if (res.destroyed || refuseHttpProxy(res)) return
         const proxy = http.request({ hostname: DSH_HOST, port: credentials.port,
           method: req.method, path: '/api/omni-mcp',
           headers: agentMcpHeaders(req, credentials, cookie), timeout: 10000 }, upstream => {
@@ -256,17 +288,21 @@ export function createGate({
         })
         proxy.on('timeout', () => proxy.destroy(new Error('MCP timeout')))
         proxy.on('error', () => {
+          if (res.destroyed) return
           if (!res.headersSent) answer(res, 502, { error: 'MCP unavailable' })
           else res.destroy()
         })
-        res.on('close', () => proxy.destroy())
+        trackStream(res, proxy)
         req.pipe(proxy)
-      } catch { answer(res, 502, { error: 'MCP unavailable' }) }
+      } catch {
+        if (!res.destroyed && !refuseHttpProxy(res)) answer(res, 502, { error: 'MCP unavailable' })
+      }
       return
     }
     const authorization = await authorize(req)
     const family = authorization?.family
     if (selfHosted && await selfHosted.handle(req, res, family, { bootstrap })) return
+    if (!local && (res.destroyed || refuseHttpProxy(res))) return
     if (!family) { answer(res, 401, { error: 'Session required' }); return }
     if (authorization.cookie) res.setHeader('set-cookie', authorization.cookie)
     try {
@@ -291,7 +327,8 @@ export function createGate({
       // /connect is a DSH bearer exchange, never a second browser sign-in path.
       if (url.pathname === '/connect') { answer(res, 401, { error: 'Session exchanges belong to the gate' }); return }
       const cookie = await credentials.cookie()
-      if (!sessions.active(family) || res.destroyed) { answer(res, 401, { error: 'Session required' }); return }
+      if (res.destroyed || refuseHttpProxy(res)) return
+      if (!sessions.active(family)) { answer(res, 401, { error: 'Session required' }); return }
       const proxy = http.request({ hostname: DSH_HOST, port: credentials.port, method: req.method, path: req.url, headers: upstreamHeaders(req, credentials, cookie, family.principal), timeout: 30_000 }, upstream => {
         // Refresh credentials for the next request on 401. Never replay a mutating body.
         if (upstream.statusCode === 401) credentials.cookie(true).catch(() => {})
@@ -300,32 +337,36 @@ export function createGate({
         upstream.on('error', () => res.destroy())
       })
       proxy.on('timeout', () => proxy.destroy(new Error('DSH timeout')))
-      proxy.on('error', () => { if (!res.headersSent) answer(res, 502, { error: 'DSH unavailable' }); else res.destroy() })
-      res.on('close', () => proxy.destroy())
+      proxy.on('error', () => {
+        if (res.destroyed) return
+        if (!res.headersSent) answer(res, 502, { error: 'DSH unavailable' })
+        else res.destroy()
+      })
+      trackStream(res, proxy)
       req.pipe(proxy)
-    } catch { if (!res.headersSent) answer(res, 502, { error: 'DSH unavailable' }); else res.destroy() }
+    } catch {
+      if (res.destroyed) return
+      if (res.headersSent) res.destroy()
+      else if (local || !refuseHttpProxy(res)) answer(res, 502, { error: 'DSH unavailable' })
+    }
   })
   server.on('connect', (req, socket) => {
-    if (viewReady && !viewReady()) {
-      refuseSocket(socket, 503, JSON.stringify(VIEW_UNAVAILABLE))
-      return
-    }
+    if (refuseSocketProxy(socket)) return
     refuseSocket(socket, reservedPathAlias(req.url, origin) ? 400 : 401)
   })
   server.on('upgrade', async (req, socket, head) => {
     socket.on('error', () => {})
-    if (viewReady && !viewReady()) {
-      refuseSocket(socket, 503, JSON.stringify(VIEW_UNAVAILABLE))
-      return
-    }
+    if (refuseSocketProxy(socket)) return
     if (reservedPathAlias(req.url, origin)) { refuseSocket(socket, 400); return }
     const authorization = await authorize(req, true)
+    if (socket.destroyed || refuseSocketProxy(socket)) return
     const family = authorization?.family
     if (!family) { refuseSocket(socket); return }
     try {
       if (!req.url.startsWith('/') || req.url.startsWith('//') || new URL(req.url, origin).searchParams.has('token') || req.headers.upgrade?.toLowerCase() !== 'websocket') { refuseSocket(socket); return }
       const cookie = await credentials.cookie()
-      if (!sessions.active(family) || socket.destroyed) { refuseSocket(socket); return }
+      if (socket.destroyed || refuseSocketProxy(socket)) return
+      if (!sessions.active(family)) { refuseSocket(socket); return }
       const proxy = http.request({ hostname: DSH_HOST, port: credentials.port, method: 'GET', path: req.url, headers: upstreamHeaders(req, credentials, cookie, family.principal, true), timeout: 5000 })
       const record = { socket, family, proxy }
       sockets.set(socket, record)
@@ -340,7 +381,11 @@ export function createGate({
       })
       proxy.on('upgrade', (response, upstream, upstreamHead) => {
         record.upstream = upstream
-        if (!sessions.active(family) || socket.destroyed) { upstream.destroy(); socket.destroy(); return }
+        if (!proxyReady() || !sessions.active(family) || socket.destroyed) {
+          upstream.destroy()
+          socket.destroy()
+          return
+        }
         proxy.setTimeout(0)
         const headers = { ...responseHeaders(response.headers), connection: 'Upgrade', upgrade: 'websocket' }
         socket.write(`HTTP/1.1 101 Switching Protocols\r\n${Object.entries(headers).map(([k, v]) => `${k}: ${v}\r\n`).join('')}\r\n`)
@@ -359,11 +404,18 @@ export function createGate({
         socket.pipe(admitted).pipe(upstream).pipe(socket)
       })
       proxy.end()
-    } catch { refuseSocket(socket, 502) }
+    } catch {
+      if (!socket.destroyed && !refuseSocketProxy(socket)) refuseSocket(socket, 502)
+    }
   })
   const revoke = id => { for (const record of sockets.values()) if (record.family.id === id) record.socket.destroy() }
   sessions.on('revoke', revoke)
-  const timer = setInterval(() => { for (const record of sockets.values()) if (!sessions.active(record.family)) record.socket.destroy() }, 1000).unref()
+  const timer = setInterval(() => {
+    if (!proxyReady()) return
+    for (const record of sockets.values()) {
+      if (!sessions.active(record.family)) record.socket.destroy()
+    }
+  }, 1000).unref()
   // Section 6's poll fallback: at least every 5 minutes while the gate holds sessions, and
   // while a removal is still pending (it may have ended the last session, and only a later
   // list can lift it). A failed poll changes nothing, and the next tick tries again.

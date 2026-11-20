@@ -5,7 +5,8 @@ import http from 'node:http'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  readProfileState, unavailableProfileState, viewProblem, withdrawGateView, writeProfileState,
+  readProfileState, unavailableProfileState, viewIdentityProblem, viewProblem,
+  withdrawGateView, writeProfileState,
 } from './gate-view.mjs'
 import { GATE_VIEW_MOUNT, PORT, gateViewDir, profileDirOf } from './lib.mjs'
 import {
@@ -33,7 +34,7 @@ export async function healthReport({
 } = {}) {
   const enabled = env.AUTOMAGIK_GATE_ENABLED === '1'
   const view = viewDir ?? (enabled ? GATE_VIEW_MOUNT : undefined)
-  const problem = view && viewProblem(view)
+  const problem = view && ((!enabled && viewIdentityProblem(view)) || viewProblem(view))
   const build = readJson(join(root, 'versions.json'))
   let state
   if (problem) {

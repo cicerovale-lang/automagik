@@ -22,7 +22,9 @@ import {
   publicUrlArgs,
   redactTokens,
 } from './lib.mjs'
-import { LAUNCH_FILE, prepareGateView, writePrivateFile, writeProfileState } from './gate-view.mjs'
+import {
+  LAUNCH_FILE, prepareGateView, writeGateFile, writePrivateFile, writeProfileState,
+} from './gate-view.mjs'
 import { followImage } from './profile-follow.mjs'
 import { nativeWorkerEnv, panelCliHomes } from './native-worker-login.mjs'
 import { installVendorClis, runFirstBoot } from './first-boot.mjs'
@@ -66,7 +68,7 @@ export function recordLaunch(dshHome, gateView, url) {
   const published = join(gateView, LAUNCH_FILE)
   const bytes = `${url}\n`
   try {
-    writePrivateFile(published, bytes)
+    writeGateFile(gateView, LAUNCH_FILE, bytes)
   } catch (error) {
     warn(`startup: could not publish the gate launch URL: ${error.message}`)
     rmSync(published, { force: true })

@@ -1,19 +1,32 @@
 // Only this module talks to DSH, always on loopback. No discovery or Cloud connection.
 import http from 'node:http'
-import { join } from 'node:path'
-import { LAUNCH_FILE, readViewFile } from './gate-view.mjs'
+import { dirname, join } from 'node:path'
+import { createViewCheck, LAUNCH_FILE, readViewFile } from './gate-view.mjs'
 import { GATE_VIEW_MOUNT, PORT } from './lib.mjs'
+import { readJson } from './profile-state.mjs'
 
 export const DSH_HOST = '127.0.0.1'
 export class DshCredentials {
-  constructor({ launchFile = join(GATE_VIEW_MOUNT, LAUNCH_FILE), port = PORT } = {}) {
+  constructor({
+    launchFile = join(GATE_VIEW_MOUNT, LAUNCH_FILE), port = PORT,
+    viewReady = createViewCheck(dirname(launchFile),
+      readJson(new URL('./versions.json', import.meta.url))),
+  } = {}) {
     this.launchFile = launchFile
     this.port = port
     this.authority = `${DSH_HOST}:${port}`
     this.pending = undefined
+    this.viewReady = viewReady
+  }
+  ensureView() {
+    if (!this.viewReady()) {
+      this.cached = undefined
+      throw new Error('Gate view unavailable')
+    }
   }
   request(path, headers = {}) {
     return new Promise((resolve, reject) => {
+      this.ensureView()
       const request = http.get({ hostname: DSH_HOST, port: this.port, path, headers: { ...headers, host: this.authority }, timeout: 5000 }, response => {
         response.resume()
         response.on('end', () => resolve(response))
@@ -24,10 +37,13 @@ export class DshCredentials {
     })
   }
   async cookie(refresh = false) {
+    this.ensureView()
     if (refresh) this.cached = undefined
     if (this.cached) return this.cached
     if (!this.pending) this.pending = this.mint().finally(() => { this.pending = undefined })
-    return this.pending
+    const cookie = await this.pending
+    this.ensureView()
+    return cookie
   }
   async mint() {
     const launch = new URL(readViewFile(this.launchFile).trim())
@@ -38,6 +54,7 @@ export class DshCredentials {
     const response = await this.request(`/?${query}`)
     const cookies = response.headers['set-cookie']
     if (response.statusCode !== 303 || !cookies?.length) throw new Error('DSH exchange refused')
+    this.ensureView()
     this.cached = cookies.map(c => c.split(';', 1)[0]).join('; ')
     return this.cached
   }

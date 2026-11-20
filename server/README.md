@@ -758,13 +758,22 @@ request because the gate fronts DSH's HTTPS traffic. With Access unset it connec
 fixed loopback DSH listener and never follows a launch file's destination or any upstream
 redirect. Tests use temporary stores and listeners.
 
-Both containers validate the view at every health check. Tampering makes both unhealthy with
-reason `gate-view-tampered`. DSH removes the published launch URL and profile summary and
-leaves the unexpected entry untouched. The gate answers requests and upgrades with `503` when
-its view check fails. It caches that verdict for one second. Once the unexpected entry is
-removed, the next DSH health check republishes the profile summary. The gate keeps returning
-`503` until DSH launches again and republishes the launch URL. A gate with no view mounted at all
-cannot reach DSH and keeps its own pages' usual answers.
+Both containers validate the view at every health check. Each publication must be a regular
+file with one link and mode `0600`. DSH stages writes in the private `gate-view-staging/`
+sibling and records the view's device and inode outside the mount. DSH reports
+`gate-view-tampered` if its view path points to a different directory.
+
+Tampering makes both health checks fail when both see the bad view. DSH unlinks the two
+publication names and leaves other entries untouched. If the gate still holds the original
+mount, its profile snapshot expires after five minutes. The gate caches its view check for
+one second, refuses proxied HTTP, upgrades and CONNECT with `503` when the view is
+unavailable, and closes open proxy streams and WebSockets. Gate-local pages, including
+claim, sign-in and recovery, keep their usual answers.
+
+After the unexpected entry is removed, the next DSH health check republishes the profile
+summary. The gate refuses proxy traffic until DSH launches again and republishes the launch
+URL. If the view directory was replaced, recreate the gate container so it mounts the
+directory DSH publishes into.
 
 An ACP vendor folder can already be a symlink into the view on a tampered volume. A vendor
 sign-in can write there between checks. Checking vendor folders before sign-in belongs in

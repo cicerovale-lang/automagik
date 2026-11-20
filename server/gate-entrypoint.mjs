@@ -7,8 +7,6 @@ import { writeFileSync } from 'node:fs'
 import { controlServer } from './gate-control.mjs'
 import { readOwner, SessionStore } from './gate-store.mjs'
 import { DshCredentials, DSH_HOST } from './gate-upstream.mjs'
-import { createViewCheck } from './gate-view.mjs'
-import { GATE_VIEW_MOUNT } from './lib.mjs'
 
 let claimErrors, control, server, bootstrap
 try {
@@ -31,7 +29,7 @@ try {
   // No owner means no session. Unknown owner formats already stopped startup above.
   if (!cloud && !owner) sessions.revokeAll()
   const credentials = new DshCredentials()
-  const viewReady = createViewCheck(GATE_VIEW_MOUNT)
+  const { viewReady } = credentials
   const access = config ? new AccessSignIn(config, { ownerDir: dir }) : undefined
   const selfHosted = !claimMode ? undefined : new SelfHostedClaim({ dir, origin: origin.origin, sessions, claimMode: process.env.AUTOMAGIK_GATE_CLAIM ?? 'local' })
   const published = process.env.AUTOMAGIK_GATE_HOST || DSH_HOST
