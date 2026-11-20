@@ -109,7 +109,7 @@ class AttachDocumentDeviceTest {
             vm.closeChat()
             vm.chatOpenerAttach = { _, scope, manage, attachments, lost ->
                 withContext(Dispatchers.IO) {
-                    val socket = Socket().apply { connect(InetSocketAddress("10.0.2.2", port), 10_000) }
+                    val socket = Socket().apply { connect(InetSocketAddress("10.0.2.2", this@AttachDocumentDeviceTest.port), 10_000) }
                     try { PocketLinkChat(ChatClient.start(CoreClient(socket.getInputStream(), socket.getOutputStream(), socket, scope, lost), manage, attachments, true)) }
                     catch (error: Exception) { socket.close(); throw error }
                 }
