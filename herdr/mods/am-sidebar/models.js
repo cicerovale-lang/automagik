@@ -86,6 +86,49 @@ export function withOverrides(programsText) {
 const INTERPRETERS = new Set(["node", "bun", "bunx", "deno", "python", "python3", "npx", "pnpm", "yarn", "uv", "uvx",
   "ruby", "bundle", "env", "sudo", "nice", "time", "watch", "nodemon"]);
 const base = (p) => String(p ?? "").split("/").pop().replace(/^-/, "");
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+// Options with a separate operand that can precede another executable in a wrapper chain.
+const WRAPPER_OPERANDS = {
+  nice: ["-n", "--adjustment"], time: ["-f", "--format", "-o", "--output"], watch: ["-n", "--interval"],
+  node: ["-r", "--require", "--import", "--loader", "--experimental-loader"],
+  bun: ["-r", "--preload", "--cwd", "--env-file"], bunx: ["-p", "--package"],
+  npx: ["-p", "--package"], pnpm: ["-C", "--dir"], yarn: ["--cwd"],
+  uv: ["--directory", "--project", "--with", "--python", "--env-file"],
+  uvx: ["--from", "--with", "--python"], ruby: ["-I", "-r"], nodemon: ["--exec", "-x"],
+};
+
+/** Whether a configured executable prefix can replace or discard a selected vendor variable. */
+export function runChangesAgentHome(words, variable) {
+  let i = 0;
+  while (INTERPRETERS.has(base(words[i]))) {
+    const wrapper = base(words[i++]);
+    // sudo can reset the environment according to the host's policy.
+    if (wrapper === "sudo") return true;
+    let options = true;
+    while (i < words.length) {
+      const word = words[i];
+      if (ASSIGNMENT.test(word)) {
+        if (word.startsWith(`${variable}=`)) return true;
+      } else if (options && word === "--") {
+        options = false;
+      } else if (options && word.startsWith("-")) {
+        if (wrapper === "env") {
+          if (word === "-u" || word === "--unset") {
+            const name = words[++i];
+            if (!name || name === variable) return true;
+          } else if (word.startsWith("--unset=") || /^-u[^-]/.test(word)) {
+            if (word.slice(word.startsWith("--") ? 8 : 2) === variable) return true;
+          } else if (["-C", "--chdir", "-a", "--argv0"].includes(word)) {
+            if (!words[++i]) return true;
+          } else if (!/^(?:--(?:chdir|argv0)=.+|-[Ca].+)$/u.test(word)) return true;
+        } else if (WRAPPER_OPERANDS[wrapper]?.includes(word)) i += 1;
+      } else break;
+      i += 1;
+    }
+  }
+  return false;
+}
 
 // The index of the agent's own executable in `words`: past any interpreter and its flags. env's
 // `-u NAME` (`--unset NAME`) takes the next word, so `env -u CLAUDE_CONFIG_DIR PATH=… claude`
@@ -95,7 +138,7 @@ function programAt(words) {
   while (i < words.length && INTERPRETERS.has(base(words[i]))) {
     const env = base(words[i]) === "env";
     i += 1;
-    while (i < words.length && (words[i].startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]))) {
+    while (i < words.length && (words[i].startsWith("-") || ASSIGNMENT.test(words[i]))) {
       i += env && (words[i] === "-u" || words[i] === "--unset") ? 2 : 1;
     }
   }
@@ -191,20 +234,20 @@ function tomlTopModel(text) {
  * whose file reads are async (the mod's readTextFile) reads these first and passes the
  * texts to defaultModelFrom / knownModelsFrom.
  */
-export function configPaths(home) {
+export function configPaths(home, codexHome = `${home}/.codex`) {
   return {
     claudeSettings: `${home}/.claude/settings.json`,
-    codexConfig: `${home}/.codex/config.toml`,
-    codexModels: `${home}/.codex/models_cache.json`,
+    codexConfig: `${codexHome}/config.toml`,
+    codexModels: `${codexHome}/models_cache.json`,
     hermesConfig: `${home}/.hermes/config.yaml`,
     antigravitySettings: `${home}/.gemini/antigravity-cli/settings.json`,
   };
 }
 
 // Every config text (null when missing) through a synchronous `read(path)`.
-export function configTexts(home, read) {
+export function configTexts(home, read, codexHome) {
   const out = {};
-  for (const [name, path] of Object.entries(configPaths(home))) {
+  for (const [name, path] of Object.entries(configPaths(home, codexHome))) {
     try { out[name] = read(path) ?? null; } catch { out[name] = null; }
   }
   return out;
@@ -332,8 +375,8 @@ export function offeredModelsFrom(agentKey, texts = {}) {
  * knownModelsFrom over a synchronous `read(path)` under `home`, plus the pack's Antigravity
  * model cache under `appHome`. No reader: the static list (Claude's), and no Antigravity list.
  */
-export function knownModels(agentKey, { home, read, appHome } = {}) {
-  const texts = read && home ? configTexts(home, read) : {};
+export function knownModels(agentKey, { home, read, appHome, codexHome } = {}) {
+  const texts = read && home ? configTexts(home, read, codexHome) : {};
   if (read && appHome) {
     try { texts.antigravityModels = read(agModelsPath(appHome)) ?? null; } catch { texts.antigravityModels = null; }
   }

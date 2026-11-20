@@ -1,174 +1,124 @@
-// Shared by the pack and am CI jobs: the --agent-home flag (#1208), without a real hc. Pure
-// rows run against the pack's own modules (am carries byte-equal copies, checked by
-// scripts/am-copies.mjs); the CLI rows run the given CLI as a program, far enough to prove a
-// refused launch never reaches a project or the network.
-import { test } from "node:test";
+// Shared by the pack and am. The CLI writes only to scratch projects.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { execFile } from "node:child_process";
+import { chmodSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-
-import { AGENT_HOME_VARS, agentHomeFor, agentHomeProblem, agentHomeVar, agentHomeWords } from "../mods/am-sidebar/logins.js";
-import { ENV, workerArgs } from "../mods/am-sidebar/workers.js";
-import { startArgs } from "../mods/am-sidebar/launchArgs.js";
-import { reviveRestartArgs } from "../mods/am-sidebar/revive.js";
+import { test } from "node:test";
+import { promisify } from "node:util";
+import { agentHomeFor, agentHomeVar } from "../mods/am-sidebar/logins.js";
+import { checkBots, parseBots } from "../mods/am-sidebar/model.js";
+import { runChangesAgentHome } from "../mods/am-sidebar/models.js";
+import { readLedger, startRow } from "../mods/am-sidebar/workers.js";
+import { scratchProject, scratchRoot } from "./scratch-project.mjs";
 
 const BOT = "b-aaaaaaaaaa";
-const CLAUDE = "/bin/claude";
-const CODEX = "/bin/codex";
+const roster = (worker) => ({
+  version: 1, categories: [],
+  bots: [{ id: BOT, name: "Genie", kind: "main", agent: "claude-code", role: "", instructions: "",
+    look: { character: "star", colour: "blue" }, worker }],
+});
+const io = { isDir: (p) => statSync(p).isDirectory(), mode: (p) => statSync(p).mode, realpath: realpathSync };
+const cliExec = promisify(execFile);
 
-/** A scratch world: a private folder, a 0755 folder, a 0777 folder, a file, and a missing path. */
-function world(t) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "agent-home-")));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const home = join(root, "home"), app = join(root, "app"), login = join(root, "login");
-  const open = join(root, "open"), wide = join(root, "wide");
-  const file = join(root, "not-a-folder");
-  mkdirSync(home); mkdirSync(app); mkdirSync(login); mkdirSync(open); mkdirSync(wide);
-  chmodSync(login, 0o700); chmodSync(open, 0o755); chmodSync(wide, 0o777);
-  writeFileSync(file, "x");
-  return { root, home, app, login, open, wide, file, missing: join(root, "missing") };
-}
-
-/** The real stat the CLI uses: a directory check and its permission bits. */
-const STAT = {
-  isDir: (path) => { try { return statSync(path).isDirectory(); } catch { return false; } },
-  mode: (path) => statSync(path).mode,
-};
-
-/** The env assignments `/usr/bin/env` carries in a launch array, before the program. */
-function envOf(args) {
-  const at = args.lastIndexOf(ENV);
-  if (at < 0) return {};
-  const env = {};
-  for (let i = at + 1; i < args.length; i += 1) {
-    const word = args[i];
-    if (word === "-u") { i += 1; continue; }
-    const match = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s.exec(word);
-    if (!match) break;
-    env[match[1]] = match[2];
-  }
-  return env;
-}
-
-/** The worker launch's env with and without one agent home, and the only key that may differ. */
-function workerEnv(agent, argv) {
-  const base = { botId: BOT, branch: "feat/x", role: "dev", name: "w", cwd: "/p/wt", parent: "t1", agent, argv };
-  const plain = workerArgs(base);
-  const home = join(tmpdir(), `agent-home-${agent}`);
-  return { plain, withHome: workerArgs({ ...base, login: agentHomeWords(agent, home) }), home };
-}
-
-// Mutants these rows are written to kill, named before the run:
-// 1. the flag is ignored: the with-home rows see no vendor assignment, or agentHomeFor drops it;
-// 2. a relative path is accepted: agentHomeProblem/agentHomeFor and the CLI rows refuse it;
-// 3. a file is accepted: agentHomeProblem/agentHomeFor and the CLI rows refuse it;
-// 4. the refusal proceeds anyway: agentHomeFor returns words on an error, or the CLI keeps going;
-// 5. only the first launch honours it: restart's env and revive's fresh retry keep the flag.
 export function agentHomeTests(cli) {
-  test("agentHomeVar maps only Claude and Codex to a vendor config variable", () => {
-    assert.deepEqual(AGENT_HOME_VARS, { claude: "CLAUDE_CONFIG_DIR", codex: "CODEX_HOME" });
-    assert.equal(agentHomeVar("claude"), "CLAUDE_CONFIG_DIR");
-    assert.equal(agentHomeVar("codex"), "CODEX_HOME");
-    assert.equal(agentHomeVar("dsh-tui"), null);
-    assert.equal(agentHomeVar("antigravity"), null);
-    assert.equal(agentHomeVar(undefined), null);
-  });
-
-  test("a relative path, a file, a missing folder and the root are refused", (t) => {
-    const { login, file, missing } = world(t);
-    assert.equal(agentHomeProblem(login, STAT), null, "a real 0700 folder passes");
-    assert.match(agentHomeProblem("relative/login"), /is not an absolute path/);
-    assert.match(agentHomeProblem(""), /has no folder/);
-    assert.match(agentHomeProblem(file, STAT), /is not a folder/);
-    assert.match(agentHomeProblem(missing, STAT), /is not a folder/);
-    assert.match(agentHomeProblem("/", STAT), /is not a login home/);
-    assert.match(agentHomeProblem("/tmp/a\nb", STAT), /has a control character/);
-  });
-
-  test("a login home must be private: 0700 passes, 0755 and 0777 are refused", (t) => {
-    const { login, open, wide } = world(t);
-    assert.equal(agentHomeProblem(login, STAT), null);
-    assert.match(agentHomeProblem(open, STAT), /is mode 0755; a login home must be 0700/);
-    assert.match(agentHomeProblem(wide, STAT), /is mode 0777; a login home must be 0700/);
-    assert.deepEqual(agentHomeFor("claude", login, STAT), { words: [`CLAUDE_CONFIG_DIR=${login}`] });
-    assert.match(agentHomeFor("codex", open, STAT).error, /must be 0700/);
-    assert.match(agentHomeFor("codex", wide, STAT).error, /must be 0700/);
-    // The validator never chmods the folder it is given.
-    assert.equal(statSync(open).mode & 0o777, 0o755);
-    assert.equal(statSync(wide).mode & 0o777, 0o777);
-  });
-
-  test("agentHomeFor refuses an agent with no vendor variable and returns exactly one assignment", (t) => {
-    const { login, missing } = world(t);
-    assert.deepEqual(agentHomeFor("claude", login, STAT), { words: [`CLAUDE_CONFIG_DIR=${login}`] });
-    assert.deepEqual(agentHomeFor("codex", login, STAT), { words: [`CODEX_HOME=${login}`] });
-    assert.match(agentHomeFor("dsh-tui", login, STAT).error, /has no vendor config folder/);
-    assert.match(agentHomeFor(undefined, login, STAT).error, /has no vendor config folder/);
-    assert.match(agentHomeFor("claude", "relative", STAT).error, /not an absolute path/);
-    assert.match(agentHomeFor("claude", missing, STAT).error, /is not a folder/);
-  });
-
-  test("a worker launch without the flag is unchanged; with it only the agent's variable is added", () => {
-    const claude = workerEnv("claude", [CLAUDE]);
-    assert.deepEqual(envOf(claude.plain), {}, "no flag: the launch env is as it was");
-    assert.deepEqual(envOf(claude.withHome), { CLAUDE_CONFIG_DIR: claude.home });
-    assert.deepEqual(Object.keys(envOf(claude.withHome)).filter((key) => envOf(claude.plain)[key] !== envOf(claude.withHome)[key]), ["CLAUDE_CONFIG_DIR"]);
-    assert.equal(claude.withHome.includes("-u"), false, "the home is set, never unset");
-
-    const codex = workerEnv("codex", [CODEX]);
-    assert.deepEqual(envOf(codex.plain), {});
-    assert.deepEqual(envOf(codex.withHome), { CODEX_HOME: codex.home });
-    assert.deepEqual(Object.keys(envOf(codex.withHome)).filter((key) => envOf(codex.plain)[key] !== envOf(codex.withHome)[key]), ["CODEX_HOME"]);
-  });
-
-  test("a restart's launch carries the same one-variable change", (t) => {
-    const { login } = world(t);
-    const args = (agent, argv, words = []) => startArgs({ botId: BOT, name: "bot", cwd: "/p", parent: ["--no-parent"], argv,
-      agent, project: "/p", login: words });
-    const claude = envOf(args("claude", [CLAUDE]));
-    assert.deepEqual(claude, {});
-    const claudeHome = envOf(args("claude", [CLAUDE], agentHomeWords("claude", login)));
-    assert.deepEqual(claudeHome, { CLAUDE_CONFIG_DIR: login });
-    assert.deepEqual(Object.keys(claudeHome).filter((key) => claude[key] !== claudeHome[key]), ["CLAUDE_CONFIG_DIR"]);
-
-    const codex = envOf(args("codex", [CODEX]));
-    const codexHome = envOf(args("codex", [CODEX], agentHomeWords("codex", login)));
-    assert.deepEqual(codex, {});
-    assert.deepEqual(codexHome, { CODEX_HOME: login });
-    assert.deepEqual(Object.keys(codexHome).filter((key) => codex[key] !== codexHome[key]), ["CODEX_HOME"]);
-  });
-
-  test("revive passes --agent-home to the restart and to its fresh retry", (t) => {
-    const { login } = world(t);
-    assert.deepEqual(reviveRestartArgs({ botId: BOT, project: "/p" }), ["restart", BOT, "--project", "/p", "--tree", "--revive", "--json"]);
-    assert.deepEqual(reviveRestartArgs({ botId: BOT, project: "/p", agentHome: login }),
-      ["restart", BOT, "--project", "/p", "--tree", "--revive", "--agent-home", login, "--json"]);
-    assert.deepEqual(reviveRestartArgs({ botId: BOT, project: "/p", agentHome: login, fresh: true }),
-      ["restart", BOT, "--project", "/p", "--tree", "--revive", "--agent-home", login, "--fresh", "--json"]);
-  });
-
-  test("the CLI refuses a relative path, a file, a missing folder, 0755 and 0777 before any launch", (t) => {
-    const { root, home, app, login, open, wide, file, missing } = world(t);
-    const env = { ...process.env, PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app,
-      AUTOMAGIK_HERDR_NO_UPDATE: "1", GIT_CEILING_DIRECTORIES: root };
-    const run = (args) => spawnSync(process.execPath, [cli, ...args], { cwd: root, env, encoding: "utf8" });
-    for (const bad of ["relative/login", file, missing, open, wide]) {
-      const worker = run(["worker", "--agent-home", bad, "task", "--branch", "feat/x"]);
-      assert.equal(worker.status, 2, `${bad}: ${worker.stderr}`);
-      assert.match(worker.stderr, /--agent-home/);
-      assert.match(worker.stderr, /not an absolute path|is not a folder|must be 0700/, bad);
-      const restart = run(["restart", BOT, "--agent-home", bad]);
-      assert.equal(restart.status, 2, `${bad}: ${restart.stderr}`);
-      assert.match(restart.stderr, /--agent-home/);
-      const revive = run(["revive", "--agent-home", bad]);
-      assert.equal(revive.status, 2, `${bad}: ${revive.stderr}`);
-      assert.match(revive.stderr, /--agent-home/);
+  test("agentHomeFor accepts exactly 0700, checks the vendor and returns the realpath", (t) => {
+    const root = scratchRoot(t, "agent-home-");
+    const dir = join(root, "login"), alias = join(root, "alias"), file = join(root, "file");
+    mkdirSync(dir, { mode: 0o700 });
+    symlinkSync(dir, alias);
+    writeFileSync(file, "");
+    for (const [agent, variable] of [["claude", "CLAUDE_CONFIG_DIR"], ["codex", "CODEX_HOME"]]) {
+      assert.equal(agentHomeVar(agent), variable);
+      assert.deepEqual(agentHomeFor(agent, alias, io), { dir, words: [variable + "=" + dir] });
     }
-    // A usable folder is not the refusal: the flag is only refused where it cannot be honoured.
-    const other = run(["start", BOT, "--agent-home", login]);
-    assert.equal(other.status, 2);
-    assert.match(other.stderr, /goes with worker, restart or revive/);
+    assert.match(agentHomeFor("dsh-tui", dir, io).error, /no vendor config folder/);
+    assert.match(agentHomeFor("claude", "relative", io).error, /not an absolute path/);
+    assert.match(agentHomeFor("claude", "/", io).error, /not a login home/);
+    assert.match(agentHomeFor("claude", file, io).error, /is not a folder/);
+    assert.match(agentHomeFor("claude", join(root, "missing"), io).error, /is not a folder/);
+    for (const [mode, label] of [[0o755, "0755"], [0o777, "0777"], [0o1700, "1700"], [0o2700, "2700"]]) {
+      chmodSync(dir, mode);
+      assert.match(agentHomeFor("claude", dir, io).error, new RegExp("mode " + label + ".*must be 0700"));
+      assert.equal(statSync(dir).mode & 0o7777, mode);
+    }
+  });
+
+  test("checkBots validates the worker home while parseBots retains malformed input", () => {
+    for (const agentHome of [null, {}, 17, "", "relative", "/", "/a\nb", "/a\u0085b"]) {
+      const raw = roster({ agentHome });
+      assert.ok(checkBots(raw).some((line) => line.includes("worker.agentHome")));
+      const parsed = parseBots(JSON.stringify(raw));
+      assert.deepEqual(parsed.file.bots[0].worker.agentHome, agentHome);
+      assert.ok(parsed.warnings.some((line) => line.includes("worker.agentHome")));
+    }
+    assert.deepEqual(checkBots(roster({ agentHome: "/may/not/exist" })), []);
+    assert.ok(checkBots(roster({ agent: "omp", agentHome: "/private" })).some((line) => /vendor config folder/.test(line)));
+  });
+
+  test("create and edit set, retain, clear and drop a home with its effective worker agent", async (t) => {
+    const root = scratchRoot(t, "agent-home-");
+    const project = scratchProject(root, "project", { isGit: false });
+    const app = join(root, "app"), home = join(root, "home"), bin = join(root, "bin"), runtime = join(root, "runtime");
+    mkdirSync(app);
+    mkdirSync(home);
+    mkdirSync(bin);
+    mkdirSync(runtime, { mode: 0o700 });
+    for (const program of ["hc", "herdr-app"]) writeFileSync(join(bin, program), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const env = { ...process.env, HOME: home, HERDR_APP_HOME: app, XDG_RUNTIME_DIR: runtime,
+      PATH: [bin, dirname(process.execPath), "/usr/bin", "/bin"].join(":"),
+      AUTOMAGIK_HERDR_NO_UPDATE: "1", AUTOMAGIK_HERDR_TEST_ROOTS: root, GIT_CEILING_DIRECTORIES: root };
+    const run = (...args) => cliExec(process.execPath, [cli, ...args, "--project", project], { cwd: project, env });
+    const ok = async (...args) => { await run(...args); };
+    const row = () => JSON.parse(readFileSync(join(project, ".herdr/bots.json"), "utf8")).bots[0];
+    const edit = (...args) => ok("edit", "Genie", ...args);
+    await ok("create", "--name", "Genie", "--kind", "main", "--agent", "claude", "--worker-agent-home", "/absent");
+    assert.equal(row().worker.agentHome, "/absent", "save checks the shape only");
+    await edit("--role", "Lead");
+    assert.equal(row().worker.agentHome, "/absent");
+    await edit("--worker-agent", "claude-code");
+    assert.equal(row().worker.agentHome, "/absent");
+    await edit("--agent", "codex");
+    assert.equal(row().worker.agentHome, "/absent", "an explicit worker agent keeps its home");
+    await edit("--worker-agent=");
+    assert.equal(row().worker?.agentHome, undefined);
+    await edit("--worker-agent-home", "/codex");
+    await edit("--agent", "claude");
+    assert.equal(row().worker?.agentHome, undefined);
+    await edit("--worker-agent-home", "/shared");
+    await edit("--agent", "codex", "--worker-agent-home", "/shared");
+    assert.equal(row().worker.agentHome, "/shared", "an explicit selection is kept on an agent change");
+    await edit("--worker-agent-home=");
+    assert.equal(row().worker?.agentHome, undefined);
+    for (const args of [["--worker-agent-home", "relative"], ["--worker-agent", "omp", "--worker-agent-home", "/private"]]) {
+      await assert.rejects(run("edit", "Genie", ...args), { code: 2 });
+      assert.equal(row().worker?.agentHome, undefined);
+    }
+    const open = join(root, "open-home");
+    mkdirSync(open, { mode: 0o755 });
+    await assert.rejects(run("worker", "task", "--branch", "feat/private", "--agent-home", open), { code: 2 });
+    for (const args of [["restart", "Genie"], ["revive"]]) {
+      await assert.rejects(run(...args, "--agent-home", open), { code: 2 });
+    }
+  });
+
+  test("the configured prefix checks nested env and leaves vendor arguments alone", () => {
+    const variable = "CODEX_HOME";
+    for (const argv of [
+      ["env", "CODEX_HOME=/other", "codex"],
+      ["nice", "-n", "5", "/usr/bin/env", "--unset", variable, "codex"],
+      ["time", "--", "env", "-uCODEX_HOME", "codex"],
+      ["env", "--unset=CODEX_HOME", "codex"],
+      ["env", "--", "CODEX_HOME=/elsewhere", "codex"],
+      ...["-i", "--ignore-environment", "-", "-S", "--some-option"].map((word) => ["env", word, "codex"]),
+    ]) assert.equal(runChangesAgentHome(argv, variable), true, JSON.stringify(argv));
+    for (const argv of [
+      ["nice", "env", "--unset", "OTHER", "env", "KEEP=1", "codex"],
+      ["node", "--require", "some-hook", "codex.js", "--never-executed", "CODEX_HOME=/somewhere"],
+    ]) assert.equal(runChangesAgentHome(argv, variable), false, JSON.stringify(argv));
+  });
+
+  test("worker ledger rows without a selected home read as null", () => {
+    assert.equal(startRow({ kind: "worker" }).agentHome, null);
+    assert.equal(readLedger('{"event":"start","kind":"worker","terminal":"t1"}\n')[0].agentHome, null);
   });
 }

@@ -18,6 +18,7 @@ import { ENV, GUARD_DIR, WORKER_OF_LABEL, stableGuardDir, stableHelper, stableRu
   KILL_GUARD_DIR, workerArgs, workerBranch, workerPlan, workerRole, workerTaskId, writesWorktree,
   PR_ASK_MAX_MS, PR_ASK_MIN_MS, PR_QUIET_EVERY_MS, PR_QUIET_FIRST_MS, PR_QUIET_WATCH_MS, PR_STATES, PR_WATCH_MS, endRow, finishedEnds, prAskDue, prBranchKey,
   prBranches, prChecksPath, prChecksText, prLikely, prRow, prRowsFor, prTime, prWatch, readPrChecks } from "../mods/am-sidebar/workers.js";
+import { workerTaskText } from "../mods/am-sidebar/workers.js";
 import { approveProject, recordFileOf } from "../mods/am-sidebar/approved.js";
 import { stableRunnerText } from "../mods/am-sidebar/dshTui.mjs";
 import { startProxy } from "../mods/am-sidebar/hcProxy.mjs";
@@ -249,37 +250,126 @@ test("M4: switch off keeps the complete worker argv byte for byte against C1", (
     .split(GUARD_DIR).join("<guard>")), baseline);
 });
 
-test("worker --agent-home carries CODEX_HOME through a Codex template (#1208)", (t) => {
-  const s = scene(t);
-  const home = join(s.root, "codex-template-home");
-  mkdirSync(home);
-  chmodSync(home, 0o700);
-  const r = s.cli(["worker", "do the template task", "--branch", "feat/template-home", "--template", "dev-sol",
-    "--agent-home", home, "--json"]);
-  assert.equal(r.code, 0, r.err);
-  const run = s.runs().at(-1);
-  // A Codex template runs through commandArgv when the home is given: hc's template form would
-  // drop the environment, so the launch must carry exactly one CODEX_HOME.
-  assert.deepEqual(run.filter((word) => word.startsWith("CODEX_HOME=")), [`CODEX_HOME=${home}`], JSON.stringify(run));
-  assert.ok(run.includes("worker.template=dev-sol"), JSON.stringify(run));
+function privateWorkerHome(s, name) {
+  const dir = join(s.root, name);
+  mkdirSync(dir, { mode: 0o700 });
+  return dir;
+}
+
+test("#1208 worker home precedence reaches the fake Claude and Codex processes", (t) => {
+  const file = team();
+  file.bots[2].agent = "claude-code";
+  file.bots[2].worker = { model: "sonnet" };
+  const s = scene(t, { file });
+  const defaultHome = privateWorkerHome(s, "default-worker-home");
+  const flagHome = privateWorkerHome(s, "flag-worker-home");
+  const alias = join(s.root, "flag-link");
+  symlinkSync(flagHome, alias);
+  const accounts = join(s.env.HOME, ".claude-legacy");
+  mkdirSync(accounts, { mode: 0o755 });
+  writeFileSync(join(s.app, "claude-logins.json"), JSON.stringify({ use: "legacy", logins: [{ id: "legacy", dir: accounts }] }));
+  for (const agent of ["claude", "codex"]) {
+    exe(join(s.root, "bin", agent), '#!/bin/sh\nprintf "%s\\n%s\\n" "${CLAUDE_CONFIG_DIR-unset}" "${CODEX_HOME-unset}"\n');
+  }
+  const pin = (agent, agentHome) => {
+    file.bots[2].worker = { model: "sonnet", ...(agent ? { agent } : {}), agentHome };
+    writeFileSync(join(s.project, ".herdr/bots.json"), JSON.stringify(file));
+  };
+  const launch = (branch, args, expected, recorded) => {
+    const r = s.cli(["worker", "check the login", "--branch", `feat/${branch}`, ...args, "--json"],
+      { env: { CLAUDE_CONFIG_DIR: "caller-claude", CODEX_HOME: "caller-codex" } });
+    assert.equal(r.code, 0, r.err);
+    const run = s.runs().at(-1);
+    const words = run.slice(run.indexOf("--") + 1);
+    const observed = spawnSync(words[0], words.slice(1), { cwd: r.json().worktree, env: { ...s.env, CLAUDE_CONFIG_DIR: "core-claude" }, encoding: "utf8" });
+    assert.equal(observed.status, 0, observed.stderr || observed.error?.message);
+    assert.deepEqual(observed.stdout.trimEnd().split("\n"), expected);
+    assert.equal(s.ledger().find((row) => row.event === "start" && row.terminal === r.json().terminal).agentHome, recorded);
+    return words;
+  };
+  const legacy = launch("legacy", ["--agent", "claude"], [accounts, "unset"], null);
+  assert.deepEqual(legacy.slice(0, 3), [ENV, legacy[1], `CLAUDE_CONFIG_DIR=${accounts}`]);
+  assert.match(legacy[1], /^PATH=/);
+  assert.deepEqual(legacy.slice(3).map((w, i, a) => (a[i - 1] === "--session-id" ? "<session>" : w)),
+    ["claude", "--settings", CLAUDE_PERSON_SETTINGS, "--permission-mode", "auto",
+      "--session-id", "<session>", workerTaskText("check the login")]);
+  pin(null, defaultHome);
+  launch("alias-matches", ["--agent", "claude"], [defaultHome, "unset"], defaultHome);
+  launch("alias-implicit", [], [defaultHome, "unset"], defaultHome);
+  launch("other-agent", ["--agent", "codex"], ["core-claude", "unset"], null);
+  pin("codex", defaultHome);
+  launch("codex-default", ["--model", "gpt-5.5"], ["core-claude", defaultHome], defaultHome);
+  launch("flag-wins", ["--agent-home", alias], ["core-claude", flagHome], flagHome);
 });
 
-test("worker --agent-home puts the agent's vendor config folder on the launch and nothing else (#1208)", (t) => {
+test("#1208 workers refuse bad modes, malformed roster homes, templates and configured env changes before creating branches", (t) => {
+  const original = team();
+  const s = scene(t, { file: original, templates: [...TEMPLATES, { name: "opaque-home", command: "unknown-wrapper" }] });
+  const dir = privateWorkerHome(s, "worker-home");
+  const refuse = (name, flags, why) => {
+    const branch = `feat/${name}`;
+    const r = s.cli(["worker", "task", "--branch", branch, ...flags]);
+    assert.equal(r.code, 2, r.err);
+    assert.match(r.err, why);
+    assert.equal(git(s.project, "branch", "--list", branch), "");
+    assert.equal(git(s.project, "worktree", "list", "--porcelain").match(/^worktree /gm).length, 1);
+    assert.equal(s.runs().length, 0);
+  };
+  chmodSync(dir, 0o1700);
+  refuse("bad-mode", ["--agent-home", dir], /0700/);
+  chmodSync(dir, 0o700);
+  for (const name of ["dev-sol", "opaque-home"]) {
+    refuse(name, ["--agent-home", dir, "--template", name], /can't be proven through a template; use --agent/);
+  }
+  const rosterPath = join(s.project, ".herdr/bots.json");
+  original.bots[2].worker.agentHome = dir;
+  for (const name of ["dev-sol", "opaque-home"]) {
+    original.bots[2].worker.template = name;
+    writeFileSync(rosterPath, JSON.stringify(original));
+    refuse(`default-${name}`, [], /can't be proven through a template; use --agent/);
+  }
+  delete original.bots[2].worker.template;
+  original.bots[2].worker.agentHome = null;
+  writeFileSync(rosterPath, JSON.stringify(original));
+  refuse("malformed", [], /worker\.agentHome.*has no folder/);
+  for (const [i, run] of [
+    ["env", "CODEX_HOME=/other", "codex"], ["nice", "-n", "5", "/usr/bin/env", "-u", "CODEX_HOME", "codex"],
+    ...["-i", "--ignore-environment", "-S", "--unknown"].map((word) => ["nice", "env", word, "codex"]),
+  ].entries()) {
+    writeFileSync(join(s.app, "programs.json"), JSON.stringify({ programs: { codex: { run } } }));
+    refuse(`env-${i}`, ["--agent-home", dir], /configured run can change or clear CODEX_HOME/);
+  }
+  delete original.bots[2].worker.agentHome;
+  writeFileSync(rosterPath, JSON.stringify(original));
+  const legacy = s.cli(["worker", "task", "--branch", "feat/legacy-template", "--template", "dev-sol"]);
+  assert.equal(legacy.code, 0, legacy.err);
+  const [run] = s.runs();
+  assert.equal(run.includes("--"), false);
+  assert.deepEqual(run.slice(run.indexOf("--parent") + 2), ["dev-sol", workerTaskText("task")]);
+});
+
+test("#1208 a selected Codex home supplies trust, model cache and its own developer instructions", (t) => {
   const s = scene(t);
-  const home = join(s.root, "codex-home");
-  mkdirSync(home);
-  chmodSync(home, 0o700);
-  const plain = s.cli(["worker", "do the plain task", "--branch", "feat/plain", "--json"]);
-  assert.equal(plain.code, 0, plain.err);
-  const withHome = s.cli(["worker", "do the home task", "--branch", "feat/with-home", "--agent-home", home, "--json"]);
-  assert.equal(withHome.code, 0, withHome.err);
-  const runs = s.runs();
-  const without = runs[runs.length - 2];
-  const pointed = runs[runs.length - 1];
-  // The bot's worker default is Codex, so the one variable is CODEX_HOME.
-  assert.equal(without.some((word) => word.startsWith("CODEX_HOME=")), false, JSON.stringify(without));
-  assert.deepEqual(pointed.filter((word) => word.startsWith("CODEX_HOME=")), [`CODEX_HOME=${home}`], JSON.stringify(pointed));
-  assert.equal(pointed.some((word) => word.startsWith("CLAUDE_CONFIG_DIR=")), false);
+  const dir = privateWorkerHome(s, "selected-codex");
+  const caller = privateWorkerHome(s, "caller-codex");
+  mkdirSync(join(s.env.HOME, ".codex"));
+  writeFileSync(join(s.env.HOME, ".codex", "models_cache.json"), JSON.stringify({ models: [{ slug: "default-only" }] }));
+  writeFileSync(join(dir, "models_cache.json"), JSON.stringify({ models: [{ slug: "selected-only" }] }));
+  writeFileSync(join(caller, "config.toml"), `[projects.${JSON.stringify(s.project)}]\ntrust_level = "trusted"\n`);
+  writeFileSync(join(dir, "config.toml"), `developer_instructions = "FROM_SELECTED_HOME"\n${untrustedToml(s.project)}`);
+  exe(join(s.root, "bin", "codex"), '#!/bin/sh\nhead -n 1 "$CODEX_HOME/config.toml"\n');
+  const r = s.cli(["worker", "task", "--branch", "feat/selected-codex", "--model", "selected-only", "--agent-home", dir, "--json"],
+    { env: { CODEX_HOME: caller } });
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /settings mark the worktree or its repository untrusted/);
+  assert.doesNotMatch(r.err, /isn't on codex's model list/);
+  const run = s.runs().at(-1);
+  const argv = run.slice(run.indexOf("--") + 1);
+  assert.deepEqual(trustWords(argv), []);
+  assert.equal(argv.some((word) => word.startsWith("developer_instructions=")), false);
+  const fake = spawnSync(argv[0], argv.slice(1), { cwd: r.json().worktree, env: s.env, encoding: "utf8" });
+  assert.equal(fake.status, 0, fake.stderr || fake.error?.message);
+  assert.match(fake.stdout, /FROM_SELECTED_HOME/);
 });
 
 test("M7: fixture pane edits cannot disable the approved switch at the next worker start",
@@ -3661,6 +3751,20 @@ async function runProxiedWorkerUnapprovedRefusal(t) {
 
 test("proxied worker CLI skips the guard only for the actual proxy transport", async (t) => {
   await runProxiedWorkerSuccess(t);
+});
+
+test("#1208 proxied worker CLI refuses a caller-selected home before creating a branch", async (t) => {
+  const { s, env, fake, proxy, closeAll } = await proxyWorkerCli(t);
+  try {
+    const dir = privateWorkerHome(s, "proxy-worker-home");
+    const branch = "feat/proxy-home";
+    const r = await s.cliAsync(["worker", "task", "--branch", branch, "--agent-home", dir, "--json"],
+      { env: { ...env, HC_SOCKET: proxy.socket } });
+    assert.equal(r.code, 2, r.err);
+    assert.match(r.err, /approved worker policy.*--agent-home.*hc proxy/);
+    assert.equal(git(s.project, "branch", "--list", branch), "");
+    assert.equal(fake.calls("terminal.run").length, 0);
+  } finally { await closeAll(); }
 });
 
 test("proxied worker CLI #1032: an approved Kimi worker starts bare through the proxy, and its task is sent past the pane's guard", async (t) => {

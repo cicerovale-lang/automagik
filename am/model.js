@@ -5,6 +5,7 @@
 
 import { AGY_MODES, LEGACY_AGENTS, agyRuleProblem, codexEffortProblem, normalizeAgyPermissions, permissionModeProblem, resolveAgent, tierProblem } from "./models.js";
 import { hermesPairProblem, hermesPairConflict } from "./hermesPair.js";
+import { agentHomePathProblem, agentHomeVar } from "./logins.js";
 
 /** The hc label key that ties a terminal to a bot; its value is the bot id (A9). */
 export const BOT_LABEL = "bot";
@@ -112,6 +113,14 @@ export const TEMPLATE_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /** The worker fields a bot may set (`worker: { agent?, model?, effort?, template?, agyMode? }`), each optional text. */
 export const WORKER_FIELDS = ["agent", "model", "effort", "template", "agyMode"];
+
+const workerAgentOf = (bot) => resolveAgent(bot?.worker?.agent ?? bot?.agent);
+
+function workerHomeProblem(bot) {
+  if (!isObject(bot.worker) || !Object.hasOwn(bot.worker, "agentHome")) return null;
+  return agentHomePathProblem(bot.worker.agentHome)
+    ?? (agentHomeVar(workerAgentOf(bot)) ? null : "has no vendor config folder for the worker default agent");
+}
 
 /**
  * Why a bot's `worker` (its workers' defaults) can't be used, or null when it is absent or
@@ -316,10 +325,18 @@ export function parseBots(text) {
       delete bot.worker.agyMode;
     }
     const workerWhy = workerProblem(bot.worker);
-    if (workerWhy) { warnings.push(`${where}: ${workerWhy}; ignored`); delete bot.worker; }
+    if (workerWhy) {
+      warnings.push(`${where}: ${workerWhy}; ignored`);
+      if (isObject(bot.worker) && Object.hasOwn(bot.worker, "agentHome")) {
+        const { agent, agentHome } = bot.worker;
+        bot.worker = { ...(agent === undefined ? {} : { agent }), agentHome };
+      } else delete bot.worker;
+    }
     else if (isObject(bot.worker) && typeof bot.worker.agyMode === "string" && !AGY_MODES.includes(bot.worker.agyMode)) {
       warnings.push(`${where}: worker agyMode ${JSON.stringify(bot.worker.agyMode)} isn't one of ${AGY_MODES.join(", ")}`);
     }
+    const homeWhy = workerHomeProblem(bot);
+    if (homeWhy) warnings.push(`${where}: worker.agentHome ${homeWhy}; launches using it will be refused`);
     const retired = (k) => (typeof k === "string" && Object.hasOwn(LEGACY_AGENTS, k) ? k : null);
     const seatOld = retired(bot.agent);
     const workerOld = isObject(bot.worker) ? retired(bot.worker.agent) ?? (bot.worker.agent ? null : seatOld) : null;
@@ -738,6 +755,8 @@ export function checkBots(file, before = null, { project = null, projects = null
     if (isObject(b.worker) && b.worker.agyMode !== undefined && b.worker.agyMode !== "" && !AGY_MODES.includes(b.worker.agyMode)) {
       errors.push(`${at}: worker agyMode ${JSON.stringify(b.worker.agyMode)} isn't one of ${AGY_MODES.join(", ")}`);
     }
+    const homeWhy = workerHomeProblem(b);
+    if (homeWhy) errors.push(`${at}: worker.agentHome ${homeWhy}`);
     if (b.agyPermissions !== undefined) {
       if (!isObject(b.agyPermissions)) errors.push(`${at}: agyPermissions is not an object with allow and deny lists`);
       else {
@@ -974,7 +993,7 @@ export function newCategoryId(title, categories = []) {
  * A lead equal to the main bot (with no leadProject) is stored as no lead; a category goes only
  * with the main bot as lead; `newCategory` ({ title, sub }) is added to the categories and used.
  */
-export function applyBotEdit(raw, entry, newCategory = null) {
+export function applyBotEdit(raw, entry, newCategory = null, { workerHomeGiven = false } = {}) {
   const out = JSON.parse(JSON.stringify(raw ?? { version: 1, categories: [], bots: [] }));
   out.version ??= 1;
   if (!Array.isArray(out.categories)) out.categories = [];
@@ -1035,9 +1054,12 @@ export function applyBotEdit(raw, entry, newCategory = null) {
   if ("code" in bot && (bot.code === undefined || bot.code === null || bot.code === "")) delete merged.code;
   // Off is the default: only a bot that keeps Claude Code's person features stores the field (#1558).
   if ("personFeatures" in bot && bot.personFeatures !== true) delete merged.personFeatures;
-  if (isObject(merged.worker) && merged.worker.agyMode === "") {
+  const dropWorkerHome = isObject(merged.worker) && Object.hasOwn(merged.worker, "agentHome")
+    && (merged.worker.agentHome === "" || (i >= 0 && !workerHomeGiven && workerAgentOf(out.bots[i]) !== workerAgentOf(merged)));
+  if (isObject(merged.worker) && (merged.worker.agyMode === "" || dropWorkerHome)) {
     merged.worker = { ...merged.worker };
-    delete merged.worker.agyMode;
+    if (merged.worker.agyMode === "") delete merged.worker.agyMode;
+    if (dropWorkerHome) delete merged.worker.agentHome;
     if (!Object.keys(merged.worker).length) delete merged.worker;
   }
   if ("worker" in bot && (!isObject(bot.worker) || Object.keys(bot.worker).length === 0)) delete merged.worker;

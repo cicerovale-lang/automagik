@@ -15,24 +15,26 @@ export const AGENT_HOME_VARS = Object.freeze({ claude: CONFIG_VAR, codex: "CODEX
 /** The variable `--agent-home` sets for `agent`, or null when this pack knows none. */
 export const agentHomeVar = (agent) => (typeof agent === "string" && Object.hasOwn(AGENT_HOME_VARS, agent) ? AGENT_HOME_VARS[agent] : null);
 
-/**
- * Why `dir` is not an `--agent-home` folder: absolute, no control character, not the filesystem
- * root, an existing directory, and private to its owner (mode 0700, never group or other bits).
- * Null when it is. `isDir` and `mode` are injected so this stays pure; `mode` is required, so a
- * caller cannot accept a folder without checking its permissions. Nothing here chmods.
- */
-export function agentHomeProblem(dir, { isDir, mode } = {}) {
+/** The path shape required when saving a worker home. */
+export function agentHomePathProblem(dir) {
   if (typeof dir !== "string" || !dir) return "has no folder";
   if (!dir.startsWith("/")) return `folder ${shown(dir)} is not an absolute path`;
-  if (/[\u0000-\u001f\u007f]/.test(dir)) return `folder ${shown(dir)} has a control character`;
-  if (dir === "/") return `folder ${shown(dir)} is not a login home`;
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(dir)) return `folder ${shown(dir)} has a control character`;
+  if (/^\/+$/u.test(dir)) return `folder ${shown(dir)} is not a login home`;
+  return null;
+}
+
+/** The launch also requires an existing directory with mode exactly 0700. */
+function agentHomeProblem(dir, { isDir, mode }) {
+  const problem = agentHomePathProblem(dir);
+  if (problem) return problem;
   if (typeof isDir !== "function" || typeof mode !== "function") return "cannot be checked as a private folder";
   let folder = false;
   try { folder = isDir(dir); } catch { folder = false; }
   if (!folder) return `folder ${shown(dir)} is not a folder`;
   let bits;
   try { bits = mode(dir); } catch { return `folder ${shown(dir)} cannot be checked for its mode`; }
-  const permissions = Number(bits) & 0o777;
+  const permissions = Number(bits) & 0o7777;
   if (permissions !== 0o700) {
     return `folder ${shown(dir)} is mode ${permissions.toString(8).padStart(4, "0")}; a login home must be 0700 (owner-only)`;
   }
@@ -45,20 +47,30 @@ export function agentHomeWords(agent, dir) {
   return name ? [`${name}=${dir}`] : [];
 }
 
-/**
- * `--agent-home` checked for one launch: { words } with the single env assignment when `dir` is
- * an absolute existing 0700 folder and `agent` has a vendor config variable, else { error } with
- * the reason. The caller refuses on `error`; no launch runs on a fallback home.
- */
-export function agentHomeFor(agent, dir, { isDir, mode } = {}) {
-  const problem = agentHomeProblem(dir, { isDir, mode });
+/** The private directory a launch would use, before checking which agent will run there. */
+export function agentHomeDirectory(dir, { isDir, mode, realpath } = {}) {
+  const shape = agentHomePathProblem(dir);
+  if (shape) return { error: shape };
+  let real = dir;
+  if (realpath) {
+    try { real = realpath(dir); } catch { real = null; }
+    if (!real) return { error: `folder ${shown(dir)} is not a folder` };
+  }
+  const problem = agentHomeProblem(real, { isDir, mode });
   if (problem) return { error: problem };
+  return { dir: real };
+}
+
+/** The checked directory and the vendor assignment for one launch, or { error }. */
+export function agentHomeFor(agent, dir, io) {
+  const checked = agentHomeDirectory(dir, io);
+  if (checked.error) return checked;
   const name = agentHomeVar(agent);
   if (!name) {
     return { error: `agent ${agent ?? "(unknown)"} has no vendor config folder this pack can set `
       + `(Claude: ${AGENT_HOME_VARS.claude}, Codex: ${AGENT_HOME_VARS.codex})` };
   }
-  return { words: [`${name}=${dir}`] };
+  return { dir: checked.dir, words: agentHomeWords(agent, checked.dir) };
 }
 
 /** The record's path in app home `appHome`: its top level, never a mod's own folder. */

@@ -8,6 +8,7 @@ import { join, dirname } from "node:path";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
 import { readJsonLines } from "./log-lines.mjs";
 import { attachPath } from "../mods/am-sidebar/attach.js";
+import { ledgerPath } from "../mods/am-sidebar/workers.js";
 
 const fixture = JSON.parse(readFileSync(new URL("./fixtures/start-programs.json", import.meta.url), "utf8"));
 const fake = new URL("./fake-hc.mjs", import.meta.url).pathname;
@@ -114,22 +115,41 @@ export function startProgramsTests(cli) {
       assert.equal(s.calls().some((c) => c[0] === "run" || c[0] === "kill"), false);
     });
   }
-  for (const agent of ["codex"]) test(`restart --agent-home: a local ${agent} launch points at the chosen home`, (t) => {
-    const s = scene(t, cli, agent, false, false);
+  test("#1208 a linked --tree sends the home guard to the holding CLI", (t) => {
+    const s = scene(t, cli, "hermes", true, true);
     s.live();
-    const home = join(s.root, `${agent}-home`);
-    mkdirSync(home);
-    chmodSync(home, 0o700);
-    const r = s.run(["restart", id, "--agent-home", home]);
+    const holdingApp = join(s.root, "holding-app"), worktree = join(s.root, "helper"), login = join(s.root, "private");
+    mkdirSync(dirname(attachPath(holdingApp)), { recursive: true });
+    mkdirSync(worktree);
+    mkdirSync(login, { mode: 0o700 });
+    writeFileSync(attachPath(holdingApp), "");
+    writeFileSync(join(holdingApp, "programs.json"), JSON.stringify(fixture));
+    writeFileSync(ledgerPath(holdingApp), JSON.stringify({ event: "start", kind: "worker", terminal: "t2",
+      created_ms: 2, agent: "codex", worktree, agentHome: login }) + "\n");
+    const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+    state.terminals.push({ address: "vm/t2", name: "private-worker", created_ms: 2, state: "live", parent: "vm/t1", die_with_parent: true,
+      cwd: worktree, argv: ["codex"], foreground: { argv: ["codex"], cwd: worktree },
+      status: { state: "idle", app: "codex" }, labels: { "worker.of": id } });
+    state.machines[0].env = { HOLDING_CLI: cli, HOLDING_APP: holdingApp };
+    writeFileSync(s.statePath, JSON.stringify(state));
+    const holding = new URL("./fake-holding-cli.mjs", import.meta.url).pathname;
+    exe(join(s.bin, "automagik-herdr"), `#!/bin/sh\nexec "${process.execPath}" "${holding}" "$@"\n`);
+    const r = s.run(["restart", id, "--force", "--tree"]);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /private-worker.*linked --tree/);
+    assert.equal(s.calls().some((call) => ["run", "kill"].includes(call[0])), false);
+    assert.deepEqual(JSON.parse(readFileSync(s.statePath, "utf8")).terminals.map((pane) => pane.state), ["live", "live"]);
+  });
+
+  for (const remote of [false, true]) test(`#1208 ${remote ? "linked" : "local"} restart --save drops the old default worker home`, (t) => {
+    const s = scene(t, cli, "codex", false, remote);
+    const edit = s.run(["edit", id, "--worker-agent-home", join(s.root, "private")]);
+    assert.equal(edit.status, 0, edit.stderr);
+    const r = s.run(["restart", id, "--agent", "omp", "--save"]);
     assert.equal(r.status, 0, r.stderr);
-    const launch = s.calls().filter((call) => call[0] === "run").at(-1);
-    const variable = agent === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
-    assert.ok(launch.includes(`${variable}=${home}`), JSON.stringify(launch));
-    assert.equal(launch.filter((word) => word.startsWith(`${variable}=`)).length, 1);
-    if (agent === "claude") {
-      assert.equal(launch.includes("-u"), false, "the chosen home is set, never unset");
-      assert.equal(launch.filter((word) => word.startsWith("CODEX_HOME=")).length, 0);
-    }
+    const [saved] = JSON.parse(readFileSync(join(s.project, ".herdr/bots.json"), "utf8")).bots;
+    assert.equal(saved.agent, "omp");
+    assert.equal(saved.worker?.agentHome, undefined);
   });
 
   for (const mode of ["tree", "end", "partial"]) test(`programs fixture: linked paired helper restart ${mode}`, (t) => {

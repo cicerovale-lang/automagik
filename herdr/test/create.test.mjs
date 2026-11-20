@@ -93,6 +93,24 @@ test("FORM_SIZE is the mockup's 1000 x 840", () => {
   assert.deepEqual(FORM_SIZE, { width: 1000, height: 840 });
 });
 
+test("#1208 form saves keep the worker home until the effective worker agent changes", async () => {
+  for (const worker of [{ agentHome: "/worker-home" }, { agent: "claude", agentHome: "/worker-home" }]) {
+    seed([{ ...MAIN, worker }]);
+    const same = await open({ form: "edit", bot: MAIN.id });
+    same.draw();
+    await same.click("bot-save");
+    assert.equal(stored().bots[0].worker.agentHome, "/worker-home");
+    const changed = await open({ form: "edit", bot: MAIN.id });
+    changed.draw();
+    await changed.click("bot-agent-omp");
+    changed.draw();
+    await changed.click("bot-save");
+    const bot = stored().bots[0];
+    assert.equal(bot.agent, "omp");
+    assert.equal(bot.worker?.agentHome, worker.agent ? "/worker-home" : undefined);
+  }
+});
+
 test("Runs on: installed agents only, plus the bot's own agent when it isn't installed", async () => {
   seed([MAIN, KIMI]);
   const { draw } = await open({ form: "create" });

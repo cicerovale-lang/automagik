@@ -590,7 +590,7 @@ am brief <bot>
 am forget <project>
 am worker "<task>" (--branch B [--base REF] | --worktree DIR)
        [[--agent A] [--model M] [--effort E] | --template T] [--name N] [--role dev|test|review|fix]
-       [--task ID [--lead BOT]]
+       [--task ID [--lead BOT]] [--agent-home DIR]
 am worker kill <pane>   # end a worker you started with am worker. Plain hc run cleanup belongs to the project's main bot.
 am update [--check | --rollback | --retry-skipped]
 am meter install [--machine M | --linked | --local] | meter uninstall
@@ -995,6 +995,15 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
   ready (up to 30 s for one that reports no status), then `hc send <pane> "<task>"`. When hc
   refuses the send (the pane waits for a sign-in or a trust answer, or has ended), the worker
   is kept and a warning names the pane and the `hc send` to run by hand; `--json` lists it.
+- **Login home:** `--agent-home DIR` selects the home for one Claude or Codex worker, through
+  `CLAUDE_CONFIG_DIR` or `CODEX_HOME`. Without the flag, a worker on the roster's default worker
+  agent uses `worker.agentHome` when set. Other workers use the usual login, including Accounts
+  for Claude. A selected home must be an existing absolute directory with mode exactly `0700`.
+  A template must be set aside with `--agent` if a home would apply. The approved hc proxy and
+  configured commands that change or clear the vendor variable refuse the selection before any
+  branch or worktree is created. A local `restart --tree` reuses the worker's recorded realpath
+  and refuses before ending any pane if that path or mode has changed. A linked `--tree` restart
+  refuses when a helper has a recorded home.
 - **Templates:** `--template T` runs the hc template `T` (`hc templates` lists them)
   instead of an agent, for seats whose command sets more than a model: a custom model
   provider, keys, flags. A template owns its command, so `--template` with `--agent`,
@@ -1525,6 +1534,11 @@ on this computer are labelled. The lead's pane is the one the attach ledger ties
   (an empty value clears one); the form keeps the field as it is. An invalid one is ignored
   with a warning. A Codex worker runs [Codex's launch mode](#codexs-launch-mode) like its bot's
   seat; a `template` owns the command and gets no flag.
+- `worker.agentHome` is an optional absolute path for a Claude or Codex default worker agent.
+  Set it with `am create|edit --worker-agent-home DIR` and clear it with `--worker-agent-home=`.
+  Changing the effective default worker agent clears the home unless the edit supplies one.
+  The save checks the path's shape. The worker launch checks the directory on its own machine
+  and refuses a malformed configured home when it would use it.
 - Ids are `b-` plus 10 lowercase base32 characters. A bot's terminal carries the hc label
   `bot=<id>`.
 

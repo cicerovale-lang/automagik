@@ -831,16 +831,18 @@ const msOrNull = (x) => (Number.isSafeInteger(x) ? x : null);
  * RFC 0021: `core` (this computer's hc core id) and `created_ms` (the terminal's, from hc get)
  * key the launch with `terminal`, since hc reuses terminal ids; `squad` (model.js squadOf, frozen
  * here at launch); `session`: the Claude session the launch runs (the id Herdr chose with
- * --session-id, or the one it resumed), else null. A seat's worker-only fields are null or false.
+ * --session-id, or the one it resumed), else null. A worker's `agentHome` is its selected
+ * vendor home's realpath, or null. A seat's worker-only fields are null or false.
  */
 export function startRow({ kind, terminal, pid, botId, task, branch, project, lead, worktree, base, created, agent, model, effort,
-  template, role, swap, override, overrideRequested, core, createdMs, squad, session, at }) {
+  template, role, swap, override, overrideRequested, core, createdMs, squad, session, agentHome, at }) {
   const requested = overrideRequested && Object.keys(overrideRequested).length ? { ...overrideRequested } : null;
   return { event: "start", kind, terminal, pid: Number.isInteger(pid) ? pid : null, botId, task: orNull(task),
     worktree: orNull(worktree), agent: orNull(agent), model: orNull(model), effort: orNull(effort), template: orNull(template),
     role: orNull(role), branch: orNull(branch), project: orNull(project), lead: orNull(lead), base: orNull(base),
     created: created === true, swap: swap === true, override: override === true, override_requested: requested,
-    core: orNull(core), created_ms: msOrNull(createdMs), squad: orNull(squad), session: orNull(session), at: stamp(at) };
+    core: orNull(core), created_ms: msOrNull(createdMs), squad: orNull(squad), session: orNull(session),
+    ...(kind === "worker" ? { agentHome: orNull(agentHome) } : {}), at: stamp(at) };
 }
 
 /**
@@ -1106,7 +1108,12 @@ export function readLedger(text) {
   const rows = [];
   for (const line of String(text ?? "").split("\n")) {
     if (!line.trim()) continue;
-    try { const row = JSON.parse(line); if (row && typeof row === "object" && !Array.isArray(row)) rows.push(row); } catch { /* skipped */ }
+    try {
+      const row = JSON.parse(line);
+      if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+      if (row.event === "start" && row.kind === "worker" && !Object.hasOwn(row, "agentHome")) row.agentHome = null;
+      rows.push(row);
+    } catch { /* skipped */ }
   }
   return rows;
 }
