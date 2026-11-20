@@ -116,18 +116,27 @@ class AttachDeviceTest {
             node.config.getOrNull(SemanticsProperties.Text).orEmpty().map { it.text } +
                 node.config.getOrNull(SemanticsProperties.ContentDescription).orEmpty()
         }.distinct().take(30).joinToString(" | ") {
-            it.replace(Regex("fixture-(caption|legacy)-[A-Za-z0-9_-]+|Fixture caption"), "<caption>")
+            it.replace(Regex("rfc0033-[A-Za-z0-9._-]+|fixture-[A-Za-z0-9._-]+|Fixture caption|Fixture Bot"), "<fixture>")
         }.ifBlank { "<no text>" }
+    }
+    private fun observed(): String {
+        val state = vm.attachments.state.value
+        val peer = state.peer
+        val chat = vm.chat.value
+        return "peer=${peer.javaClass.simpleName}, offer.documents null=" +
+            "${(peer as? Attach.Peer.Offered)?.offer?.documents == null}, " +
+            "watchGen=${state.watchGen}, live=${vm.attachments.live(state.watchGen)}, " +
+            "chat.connected=${chat?.connected}, chat.error=${chat?.error?.replace(Regex("rfc0033-[A-Za-z0-9._-]+|fixture-[A-Za-z0-9._-]+"), "<fixture>")}, UI=${observedUi()}"
     }
     private fun awaitUi(expected: String, timeout: Long = 30_000, condition: () -> Boolean) {
         try {
             await(timeout, condition)
         } catch (error: ComposeTimeoutException) {
-            throw AssertionError("Expected $expected within ${timeout}ms. Observed UI: ${observedUi()}", error)
+            throw AssertionError("Expected $expected within ${timeout}ms. Observed ${observed()}", error)
         }
     }
     private fun assertUi(expected: String, condition: Boolean) {
-        if (!condition) throw AssertionError("Expected $expected. Observed UI: ${observedUi()}")
+        if (!condition) throw AssertionError("Expected $expected. Observed ${observed()}")
     }
     private fun reconnect(case: String) {
         awaitUi("$case to show Reconnect after the TCP drop") { label("Reconnect") }
@@ -135,7 +144,9 @@ class AttachDeviceTest {
     }
     private fun show() {
         compose.setContent { ChatPane(vm, ref, null, {}) }
-        await { compose.onAllNodesWithContentDescription("Add images").fetchSemanticsNodes().isNotEmpty() }
+        awaitUi("images-only chat to show Add images") {
+            compose.onAllNodesWithContentDescription("Add images").fetchSemanticsNodes().isNotEmpty()
+        }
     }
     private fun fixture(noisy: Boolean = false): Uri {
         val bitmap = Bitmap.createBitmap(if (noisy) 1024 else 64, if (noisy) 1024 else 48, Bitmap.Config.ARGB_8888)
@@ -161,7 +172,7 @@ class AttachDeviceTest {
         }
         intending(anyIntent()).respondWith(ActivityResult(Activity.RESULT_OK, answer))
         compose.onNodeWithContentDescription("Add images").performClick()
-        await { compose.onAllNodesWithContentDescription("Selected image").fetchSemanticsNodes().size >= uris.size }
+        awaitUi("selected image count ${uris.size}") { compose.onAllNodesWithContentDescription("Selected image").fetchSemanticsNodes().size >= uris.size }
     }
     private fun send(caption: String? = null) {
         if (caption != null) compose.onAllNodes(hasSetTextAction()).onFirst().performTextInput(caption)
@@ -186,25 +197,25 @@ class AttachDeviceTest {
     @Test fun a_D1_twoImagesWithCaptionProgressAndOneRichRow() {
         control("slowChunks"); show(); val before = counts()
         add(fixture(), fixture()); send("fixture-caption-d1")
-        await { text("Uploading") }
-        await(30_000) { vm.attachments.state.value.messages.any { it.phase == Phase.UPLOADING && it.progress > 0f } }
-        await(90_000) { deltas(before, counts(), "a") == 1 && text("Sent") }
+        awaitUi("Uploading notice") { text("Uploading") }
+        awaitUi("upload progress above zero") { vm.attachments.state.value.messages.any { it.phase == Phase.UPLOADING && it.progress > 0f } }
+        awaitUi("one committed message in Session a and Sent", 90_000) { deltas(before, counts(), "a") == 1 && text("Sent") }
         val after = counts()
         assertEquals(1, prompts(after).length() - prompts(before).length())
         assertEquals(listOf("text", "file", "file"), content(prompts(after), prompts(after).length() - 1))
         assertEquals(listOf("text", "image", "image"), content(messages(after, "a"), messages(after, "a").length() - 1))
-        await { compose.onAllNodesWithText("Image ·", substring = true).fetchSemanticsNodes().size >= 2 }
+        awaitUi("two image receipts") { compose.onAllNodesWithText("Image ·", substring = true).fetchSemanticsNodes().size >= 2 }
         assertTrue(vm.chat.value!!.rows.any { it.blocks?.count { block -> block is Attach.Block.Image } == 2 })
         noStoredImage(); case("D1")
     }
 
     @Test fun b_D2_imageOnlyNoEmptyTextBubble() {
         show(); val before = counts(); add(fixture()); send()
-        await(90_000) { deltas(before, counts(), "a") == 1 && text("Sent") }
+        awaitUi("one committed message in Session a and Sent", 90_000) { deltas(before, counts(), "a") == 1 && text("Sent") }
         val after = counts()
         assertEquals(listOf("file"), content(prompts(after), prompts(after).length() - 1))
         assertEquals(listOf("image"), content(messages(after, "a"), messages(after, "a").length() - 1))
-        await { vm.chat.value?.rows?.any { row -> row.text.isBlank() && row.blocks?.any { it is Attach.Block.Image } == true } == true }
+        awaitUi("image-only chat row") { vm.chat.value?.rows?.any { row -> row.text.isBlank() && row.blocks?.any { it is Attach.Block.Image } == true } == true }
         assertTrue(vm.chat.value!!.rows.any { it.text.isBlank() && it.blocks?.count { block -> block is Attach.Block.Image } == 1 })
         assertTrue(compose.onAllNodesWithText("Image ·", substring = true).fetchSemanticsNodes().isNotEmpty())
         noStoredImage(); case("D2")
@@ -252,12 +263,12 @@ class AttachDeviceTest {
 
     @Test fun d_D4_cancelAfterFirstAdmissionForwardsCancelAndInsertsNothing() {
         control("slowChunks"); show(); val before = counts(); add(fixture(), fixture(true)); send()
-        await(90_000) { counts().getJSONArray("held").length() > before.getJSONArray("held").length() }
-        await { count(counts(), "uploadBegins") >= count(before, "uploadBegins") + 2 }
+        awaitUi("one held upload after the disconnect", 90_000) { counts().getJSONArray("held").length() > before.getJSONArray("held").length() }
+        awaitUi("two upload begin requests") { count(counts(), "uploadBegins") >= count(before, "uploadBegins") + 2 }
         val first = counts().getJSONArray("admitted").getString(count(before, "admitted"))
         compose.onNodeWithText("Cancel").performClick()
-        await(30_000) { count(counts(), "forwardedCancel") > count(before, "forwardedCancel") }
-        await { vm.attachments.state.value.messages.isEmpty() && vm.attachments.state.value.draft.size == 2 }
+        awaitUi("upload cancel forwarded to DSH") { count(counts(), "forwardedCancel") > count(before, "forwardedCancel") }
+        awaitUi("no sending messages and two draft images") { vm.attachments.state.value.messages.isEmpty() && vm.attachments.state.value.draft.size == 2 }
         val after = counts()
         assertEquals(1, after.getInt("watches"))
         val uploads = after.getJSONArray("uploadBegins")
@@ -296,16 +307,16 @@ class AttachDeviceTest {
 
     @Test fun f_D6a_moveAfterLostReplyOffersSendAgainOnlyForNewSession() {
         show(); val before = counts(); control("dropAfterAccept"); add(fixture()); send()
-        await(90_000) { text("Maybe not sent") }
+        awaitUi("Maybe not sent", 90_000) { text("Maybe not sent") }
         control("move")
         compose.runOnIdle { vm.reconnectChat() }
-        await(90_000) { text("Retry") }
+        awaitUi("Retry", 90_000) { text("Retry") }
         compose.onNodeWithText("Retry").performClick()
-        await(90_000) { text("this Bot started a new chat on the computer") && text("Send as new") }
+        awaitUi("moved Bot notice and Send as new", 90_000) { text("this Bot started a new chat on the computer") && text("Send as new") }
         assertEquals(0, deltas(before, counts(), "b"))
         compose.onAllNodesWithText("Send as new").onFirst().performClick()
         if (text("Send as a new message?")) compose.onNodeWithText("Send").performClick()
-        await(90_000) { deltas(before, counts(), "b") == 1 }
+        awaitUi("one committed message in Session b", 90_000) { deltas(before, counts(), "b") == 1 }
         assertEquals(1, deltas(before, counts(), "a")); case("D6a")
     }
 
@@ -343,32 +354,32 @@ class AttachDeviceTest {
 
     @Test fun h_D7_oldLinkNamesPocketLinkAndTextStillWorks() {
         port = 47111; show(); compose.onNodeWithContentDescription("Add images").performClick()
-        await { text("newer Pocket Link") }
+        awaitUi("newer Pocket Link notice") { text("newer Pocket Link") }
         val before = counts(); send("fixture-legacy-text")
-        await(30_000) { deltas(before, counts(), "a") == 1 }; case("D7")
+        awaitUi("one committed message in Session a") { deltas(before, counts(), "a") == 1 }; case("D7")
     }
 
     @Test fun i_D8_unavailableAppNamesAutomagik() {
         port = 47112; show(); compose.onNodeWithContentDescription("Add images").performClick()
-        await { text("newer Automagik app") }; case("D8")
+        awaitUi("newer Automagik app notice") { text("newer Automagik app") }; case("D8")
     }
 
     @Test fun j_D9_reconnectRenegotiatesWithoutRetargeting() {
         port = 47112; show(); compose.onNodeWithContentDescription("Add images").performClick()
-        await { text("newer Automagik app") }
+        awaitUi("newer Automagik app notice") { text("newer Automagik app") }
         port = 47114; control("drop")
-        await(90_000) { vm.attachments.state.value.peer is Attach.Peer.Offered || text("Reconnect") }
+        awaitUi("attachment offer or Reconnect", 90_000) { vm.attachments.state.value.peer is Attach.Peer.Offered || text("Reconnect") }
         if (text("Reconnect")) compose.onNodeWithText("Reconnect").performClick()
-        await(90_000) { vm.attachments.state.value.peer is Attach.Peer.Offered }
+        awaitUi("attachment offer", 90_000) { vm.attachments.state.value.peer is Attach.Peer.Offered }
         assertEquals(ref.address, vm.chat.value?.terminal)
         add(fixture()); assertTrue(vm.attachments.state.value.draft.isNotEmpty())
         port = 47111; control("drop")
-        await(90_000) { text("Reconnect") }
+        awaitUi("Reconnect", 90_000) { text("Reconnect") }
         compose.onNodeWithText("Reconnect").performClick()
-        await(90_000) { vm.attachments.state.value.peer is Attach.Peer.Missing }
+        awaitUi("missing attachment offer", 90_000) { vm.attachments.state.value.peer is Attach.Peer.Missing }
         assertEquals(ref.address, vm.chat.value?.terminal)
         compose.onNodeWithContentDescription("Add images").performClick()
-        await { text("newer Pocket Link") }; case("D9")
+        awaitUi("newer Pocket Link notice") { text("newer Pocket Link") }; case("D9")
     }
 
     @Test fun k_D12_noSocketHelloIsNone() {

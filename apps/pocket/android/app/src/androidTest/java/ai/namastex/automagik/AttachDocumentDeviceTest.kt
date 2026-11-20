@@ -17,6 +17,10 @@ import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
+import androidx.compose.ui.test.ComposeTimeoutException
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
@@ -112,9 +116,13 @@ class AttachDocumentDeviceTest {
             }
         }
         compose.setContent { ChatPane(vm, ref, null, {}) }
-        compose.waitUntil(30_000) {
+        awaitUi("document-capable chat to show Add images or files") {
+            docs()
+        }
+        awaitUi("document-capable peer and live chat watch") {
             val state = vm.attachments.state.value
-            state.peer is Attach.Peer.Offered && state.watchGen != 0L && vm.attachments.live(state.watchGen)
+            (state.peer as? Attach.Peer.Offered)?.offer?.documents != null &&
+                state.watchGen != 0L && vm.attachments.live(state.watchGen)
         }
     }
 
@@ -142,6 +150,35 @@ class AttachDocumentDeviceTest {
     private fun notice(part: String) = compose.onAllNodesWithText(part, substring = true).fetchSemanticsNodes().isNotEmpty()
     private fun docs() = compose.onAllNodesWithContentDescription("Add images or files").fetchSemanticsNodes().isNotEmpty()
     private fun imageButton() = compose.onAllNodesWithContentDescription("Add images").fetchSemanticsNodes().isNotEmpty()
+    private fun safe(value: String) = value
+        .replace(Regex("rfc0033-[A-Za-z0-9._-]+|notes-café\\.txt|fixture-[A-Za-z0-9._-]+|Fixture caption|Fixture Bot"), "<fixture>")
+        .replace(Regex("Line with café|picker round trip|retry café|not a PDF|<p>markup</p>|withdraw"), "<fixture-content>")
+        .replace(Regex("content://[^\\s|]+"), "<content-uri>")
+    private fun observedUi(): String {
+        val visible = SemanticsMatcher.keyIsDefined(SemanticsProperties.Text) or
+            SemanticsMatcher.keyIsDefined(SemanticsProperties.ContentDescription)
+        return compose.onAllNodes(visible).fetchSemanticsNodes().flatMap { node ->
+            node.config.getOrNull(SemanticsProperties.Text).orEmpty().map { it.text } +
+                node.config.getOrNull(SemanticsProperties.ContentDescription).orEmpty()
+        }.distinct().take(30).joinToString(" | ") { safe(it) }.ifBlank { "<no text>" }
+    }
+    private fun observed(): String {
+        val state = vm.attachments.state.value
+        val chat = vm.chat.value
+        val peer = state.peer
+        return "peer=${peer.javaClass.simpleName}, offer.documents null=" +
+            "${(peer as? Attach.Peer.Offered)?.offer?.documents == null}, " +
+            "watchGen=${state.watchGen}, live=${vm.attachments.live(state.watchGen)}, " +
+            "chat.connected=${chat?.connected}, chat.error=${chat?.error?.let(::safe)}, " +
+            "draft=${state.draft.size}, pendingPick=${state.pendingPick != null}, " +
+            "waiting=${state.waiting != null}, preparing=${state.preparing}, UI=${observedUi()}"
+    }
+    private fun awaitUi(expected: String, timeout: Long = 30_000, condition: () -> Boolean) {
+        try { compose.waitUntil(timeout, condition) }
+        catch (error: ComposeTimeoutException) {
+            throw AssertionError("Expected $expected within ${timeout}ms; observed ${observed()}", error)
+        }
+    }
     private fun fixture(name: String, mime: String, bytes: ByteArray): Uri {
         val id = UUID.randomUUID().toString()
         val file = File(testContext.filesDir, id)
@@ -154,7 +191,7 @@ class AttachDocumentDeviceTest {
         val before = vm.attachments.state.value.draft.size
         val token = vm.attachments.pick(kind)?.token ?: error("pick unavailable")
         deliverAttachPick(vm.attachments, kind, token, uris.toList())
-        compose.waitUntil(30_000) { vm.attachments.state.value.draft.size == before + uris.size }
+        awaitUi("draft size ${before + uris.size}") { vm.attachments.state.value.draft.size == before + uris.size }
     }
     private fun image(): Uri {
         val bitmap = Bitmap.createBitmap(64, 48, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.rgb(24, 80, 160)) }
@@ -179,7 +216,9 @@ class AttachDocumentDeviceTest {
         val array = row.getJSONArray("contentTypes")
         return (0 until array.length()).map(array::getString)
     }
-    private fun awaitOne(before: Int) = compose.waitUntil(90_000) { committed().length() == before + 1 && notice("Sent") }
+    private fun awaitOne(before: Int) = awaitUi("one committed message and Sent", 90_000) {
+        committed().length() == before + 1 && notice("Sent")
+    }
 
     @Test fun a_E1_mixedImageTxtPdfCaptionAndStoredBytes() {
         assertTrue(docs())
@@ -205,7 +244,7 @@ class AttachDocumentDeviceTest {
                 .put(JSONObject().put("name", "rfc0033-doc-report.pdf").put("size", pdf.size)))).getBoolean("ok"))
         assertEquals(listOf("text", "file", "file", "file"), types(after.getJSONArray("prompts").getJSONObject(after.getJSONArray("prompts").length() - 1)))
         assertTrue(control("verifyFiles", expected(Triple(txt, "notes-café.txt", txt.size), Triple(pdf, "rfc0033-doc-report.pdf", pdf.size))).getBoolean("ok"))
-        compose.waitUntil(30_000) {
+        awaitUi("both files to appear on the computer") {
             notice("File · notes-café.txt · ${txt.size} B · on the computer") &&
                 notice("File · rfc0033-doc-report.pdf · ${pdf.size} B · on the computer")
         }
@@ -224,7 +263,7 @@ class AttachDocumentDeviceTest {
         bad.forEachIndexed { index, uri ->
             val token = vm.attachments.pick(AttachmentKind.DOCUMENT)?.token ?: error("pick unavailable")
             deliverAttachPick(vm.attachments, AttachmentKind.DOCUMENT, token, listOf(uri))
-            compose.waitUntil(30_000) {
+            awaitUi("invalid document pick to finish and show a refusal") {
                 val state = vm.attachments.state.value
                 state.pendingPick == null && state.waiting == null && state.preparing == 0 &&
                     notice(if (index == 2) "Pick a TXT or PDF" else "valid TXT/PDF")
@@ -242,9 +281,9 @@ class AttachDocumentDeviceTest {
         control("dropAfterAccept")
         pick(AttachmentKind.DOCUMENT, fixture("rfc0033-doc-retry.txt", "txt", bytes))
         send()
-        compose.waitUntil(90_000) { notice("Maybe not sent") }
+        awaitUi("Maybe not sent after the lost acknowledgement", 90_000) { notice("Maybe not sent") }
         compose.onNodeWithText("Reconnect").performClick()
-        compose.waitUntil(30_000) { notice("Retry") }
+        awaitUi("Retry after reconnect") { notice("Retry") }
         compose.onNodeWithText("Retry").performClick()
         awaitOne(before)
         val after = counts()
@@ -262,7 +301,7 @@ class AttachDocumentDeviceTest {
     @Test fun d_E4_imagesOnlyPeerOpensPhotoPickerDirectly() {
         port = 47114
         compose.runOnIdle { vm.reconnectChat() }
-        compose.waitUntil(30_000) {
+        awaitUi("images-only peer and live chat watch") {
             val state = vm.attachments.state.value
             imageButton() && vm.attachments.live(state.watchGen)
         }
@@ -273,7 +312,7 @@ class AttachDocumentDeviceTest {
         intending(anyIntent()).respondWith(ActivityResult(Activity.RESULT_OK, Intent().setData(photo)))
         compose.onNodeWithContentDescription("Add images").performClick()
         intended(anyIntent())
-        compose.waitUntil(30_000) { vm.attachments.state.value.draft.size == 1 }
+        awaitUi("one selected attachment in the draft") { vm.attachments.state.value.draft.size == 1 }
         assertTrue(compose.onAllNodesWithContentDescription("Selected image").fetchSemanticsNodes().isNotEmpty())
         send()
         awaitOne(before)
@@ -289,13 +328,13 @@ class AttachDocumentDeviceTest {
         control("refuseFiles")
         pick(AttachmentKind.DOCUMENT, fixture("rfc0033-doc-withdraw.txt", "txt", "withdraw\n".toByteArray()))
         send()
-        compose.waitUntil(90_000) { notice("computer doesn't take files") && imageButton() }
+        awaitUi("file refusal and images-only button", 90_000) { notice("computer doesn't take files") && imageButton() }
         assertFalse(docs())
         val photo = image()
         intending(anyIntent()).respondWith(ActivityResult(Activity.RESULT_OK, Intent().setData(photo)))
         compose.onNodeWithContentDescription("Add images").performClick()
         intended(anyIntent())
-        compose.waitUntil(30_000) { vm.attachments.state.value.draft.size == 1 }
+        awaitUi("one selected attachment in the draft") { vm.attachments.state.value.draft.size == 1 }
         send()
         awaitOne(before)
         assertEquals(listOf("image"), types(committed().getJSONObject(before)))
@@ -345,12 +384,7 @@ class AttachDocumentDeviceTest {
         }
         val before = committed().length()
         tile.click()
-        val returned = runCatching { compose.waitUntil(30_000) { vm.attachments.state.value.draft.size == 1 } }.isSuccess
-        if (!returned) {
-            device.pressBack()
-            instrumentation.sendStatus(0, Bundle().apply { putString(Instrumentation.REPORT_KEY_STREAMRESULT, "ASSERT:E6 NOT AUTOMATED DocumentsUI did not return a selected file\n") })
-            return
-        }
+        awaitUi("DocumentsUI selection to return one file") { vm.attachments.state.value.draft.size == 1 }
         send()
         awaitOne(before)
         assertEquals(listOf("file"), types(committed().getJSONObject(before)))

@@ -98,9 +98,10 @@ start_harness() {
 }
 
 build_apks() (
-  cd "$1" || return
+  local tree=$1 label=$2
+  cd "$tree" || return
   ./gradlew --init-script "$root/.automagik/verify-0033-d4d.init.gradle" --no-daemon --max-workers=2 --stacktrace \
-    :app:assembleGithubDebug :app:assembleGithubDebugAndroidTest
+    :app:assembleGithubDebug :app:assembleGithubDebugAndroidTest 2>&1 | redact | tee "$artifact/build-$label.txt"
 )
 
 install_apks() {
@@ -122,7 +123,7 @@ build_legacy() {
   git archive "$d3^" | tar -x -C "$legacy" || return
   mkdir -p "$test_dir" || return
   cp .automagik/LegacyPhoneDeviceTest.kt "$test_dir/" || return
-  build_apks "$legacy/apps/pocket/android"
+  build_apks "$legacy/apps/pocket/android" legacy
 }
 
 package=ai.namastex.automagik
@@ -174,18 +175,13 @@ fi
 
 current=apps/pocket/android
 attach_cases=(D1 D2 D3 D3b D4 D5 D6a D6b D7 D8 D9 D12)
-if apk_pipeline current "$current" build_apks "$current"; then
-  if [ "$api" = 35 ]; then
-    if [ "$harness_ready" = true ]; then
-      run_stage attach instrument attach AttachDeviceTest 11 "${attach_cases[@]}" || :
-      run_stage picker instrument picker AttachPickerDeviceTest 1 D11 || :
-    else
-      skip_stages 'harness unavailable' attach "${attach_cases[@]}" picker D11
-    fi
-  fi
+if apk_pipeline current "$current" build_apks "$current" current; then
   if [ "$harness_ready" = true ]; then
+    run_stage attach instrument attach AttachDeviceTest 11 "${attach_cases[@]}" || :
+    run_stage picker instrument picker AttachPickerDeviceTest 1 D11 || :
     run_stage documents instrument documents AttachDocumentDeviceTest 6 E1 E2 E3 E4 E5 E6 || :
   else
+    skip_stages 'harness unavailable' attach "${attach_cases[@]}" picker D11
     skip_stages 'harness unavailable' documents E1 E2 E3 E4 E5 E6
   fi
   if run_stage codec instrument codec AttachImageDeviceTest 7; then
@@ -194,23 +190,19 @@ if apk_pipeline current "$current" build_apks "$current"; then
     record D13 FAIL
   fi
 else
-  if [ "$api" = 35 ]; then
-    skip_stages 'current APKs unavailable' attach "${attach_cases[@]}" picker D11
-  fi
+  skip_stages 'current APKs unavailable' attach "${attach_cases[@]}" picker D11
   skip_stages 'current APKs unavailable' documents E1 E2 E3 E4 E5 E6 codec D13
 fi
 
-if [ "$api" = 35 ]; then
-  legacy="$run_temp/rfc-0033-pre-d3"
-  if apk_pipeline legacy "$legacy/apps/pocket/android" build_legacy; then
-    if [ "$harness_ready" = true ]; then
-      run_stage legacy instrument legacy LegacyPhoneDeviceTest 1 D10 || :
-    else
-      skip_stages 'harness unavailable' legacy D10
-    fi
+legacy="$run_temp/rfc-0033-pre-d3"
+if apk_pipeline legacy "$legacy/apps/pocket/android" build_legacy; then
+  if [ "$harness_ready" = true ]; then
+    run_stage legacy instrument legacy LegacyPhoneDeviceTest 1 D10 || :
   else
-    skip_stages 'legacy APKs unavailable' legacy D10
+    skip_stages 'harness unavailable' legacy D10
   fi
+else
+  skip_stages 'legacy APKs unavailable' legacy D10
 fi
 
 reported=true

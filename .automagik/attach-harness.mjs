@@ -125,12 +125,24 @@ const base = {
   answer() { throw new Error('unexpected base answer') },
   interrupt() { throw new Error('unexpected base interrupt') },
 }
-function route(engine, Connection = ChatConnection, Writer = chatWriter) {
+function route(engine, Connection = ChatConnection, Writer = chatWriter, port = 0) {
   return socket => {
+    process.stderr.write(`phone-open port=${port}\n`)
     phoneSockets.add(socket)
     socket.on('error', () => {})
     let conn
-    const writer = Writer({ send: bytes => new Promise((resolve, reject) => socket.write(bytes, error => error ? reject(error) : resolve())),
+    const writer = Writer({ send: bytes => new Promise((resolve, reject) => {
+      // The only unframed reply is hello. Report its capability shape, never its payload.
+      const line = bytes.toString('utf8')
+      if (line.startsWith('{')) {
+        try {
+          const reply = JSON.parse(line)
+          if (reply.id === 0 && reply.result) process.stderr.write(
+            `phone-hello port=${port} peer=${reply.result.attachments?.unavailable ?? (reply.result.attachments ? 'offered' : 'missing')} documents=${Boolean(reply.result.attachments?.documents)}\n`)
+        } catch {}
+      }
+      socket.write(bytes, error => error ? reject(error) : resolve())
+    }),
       isClosed: () => conn.closed, isRevoked: () => false, onFail: () => conn.close('write failed') })
     conn = new Connection({ engine, device: PHONE, write: writer, end: () => socket.destroy() })
     let ingressPending = ''
@@ -140,6 +152,8 @@ function route(engine, Connection = ChatConnection, Writer = chatWriter) {
         const line = ingressPending.slice(0, end); ingressPending = ingressPending.slice(end + 1)
         let request
         try { request = JSON.parse(line) } catch { continue }
+        if (request.method === 'hello') process.stderr.write(
+          `phone-request port=${port} attachments=${request.params?.attachments === 1} documents=${request.params?.documents === 1}\n`)
         if (request.method === 'chat.attach') {
           const type = request.params?.mediaType
           ingress[type === 'text/plain' || type === 'application/pdf' ? 'document' :
@@ -149,7 +163,7 @@ function route(engine, Connection = ChatConnection, Writer = chatWriter) {
       }
       conn.feed(bytes)
     })
-    socket.on('close', () => { conn.close(); phoneSockets.delete(socket) })
+    socket.on('close', () => { process.stderr.write(`phone-close port=${port}\n`); conn.close(); phoneSockets.delete(socket) })
   }
 }
 async function listen(port, handler) {
@@ -288,7 +302,8 @@ try {
   const imagesOnly = new DshSource({ path: socketPathOf(home), check: () => true, attachments: true, documents: false })
   dshSources.push(modern, noApp, none, imagesOnly)
   if (!await modern.open() || !await noApp.open() || !await imagesOnly.open()) throw new Error('DSH socket refused bridge')
-  await listen(47110, route(withDsh(base, modern)))
+  process.stderr.write(`dsh-offer modern=${Boolean(modern.attachOffer)} documents=${Boolean(modern.attachOffer?.documents)} images-only=${Boolean(imagesOnly.attachOffer)}\n`)
+  await listen(47110, route(withDsh(base, modern), ChatConnection, chatWriter, 47110))
   if (!process.env.OLD_BRIDGE_DIR) throw new Error('OLD_BRIDGE_DIR required')
   const oldDir = process.env.OLD_BRIDGE_DIR
   const oldChat = await import(pathToFileURL(join(oldDir, 'chat.mjs')).href)
@@ -296,10 +311,10 @@ try {
   const legacy = new oldDsh.DshSource({ path: socketPathOf(home), check: () => true })
   dshSources.push(legacy)
   if (!await legacy.open()) throw new Error('old bridge could not open DSH socket')
-  await listen(47111, route(oldDsh.withDsh(base, legacy), oldChat.ChatConnection, oldChat.chatWriter))
-  await listen(47112, route(withDsh(base, noApp)))
-  await listen(47113, route(withDsh(base, none)))
-  await listen(47114, route(withDsh(base, imagesOnly)))
+  await listen(47111, route(oldDsh.withDsh(base, legacy), oldChat.ChatConnection, oldChat.chatWriter, 47111))
+  await listen(47112, route(withDsh(base, noApp), ChatConnection, chatWriter, 47112))
+  await listen(47113, route(withDsh(base, none), ChatConnection, chatWriter, 47113))
+  await listen(47114, route(withDsh(base, imagesOnly), ChatConnection, chatWriter, 47114))
   await listen(47115, control)
   process.stdout.write('READY\n')
 } catch (error) {

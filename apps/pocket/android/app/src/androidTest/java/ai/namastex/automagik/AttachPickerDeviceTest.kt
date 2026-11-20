@@ -6,7 +6,10 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Bundle
 import android.provider.MediaStore
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.ComposeTimeoutException
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -59,8 +62,32 @@ class AttachPickerDeviceTest {
         compose.activityRule.scenario.state == Lifecycle.State.RESUMED &&
             compose.onAllNodesWithContentDescription(description).fetchSemanticsNodes().isNotEmpty()
 
+    private fun observed(): String {
+        val state = vm.attachments.state.value
+        val peer = state.peer
+        val chat = vm.chat.value
+        val visible = SemanticsMatcher.keyIsDefined(SemanticsProperties.Text) or
+            SemanticsMatcher.keyIsDefined(SemanticsProperties.ContentDescription)
+        val ui = compose.onAllNodes(visible).fetchSemanticsNodes().flatMap { node ->
+            node.config.getOrNull(SemanticsProperties.Text).orEmpty().map { it.text } +
+                node.config.getOrNull(SemanticsProperties.ContentDescription).orEmpty()
+        }.distinct().take(30).joinToString(" | ") {
+            it.replace(Regex("rfc0033-[A-Za-z0-9._-]+|fixture-[A-Za-z0-9._-]+|Fixture Bot"), "<fixture>")
+        }.ifBlank { "<no text>" }
+        return "peer=${peer.javaClass.simpleName}, offer.documents null=" +
+            "${(peer as? Attach.Peer.Offered)?.offer?.documents == null}, " +
+            "watchGen=${state.watchGen}, live=${vm.attachments.live(state.watchGen)}, " +
+            "chat.connected=${chat?.connected}, chat.error=${chat?.error?.replace(Regex("rfc0033-[A-Za-z0-9._-]+|fixture-[A-Za-z0-9._-]+|Fixture Bot"), "<fixture>")}, UI=$ui"
+    }
+    private fun awaitUi(expected: String, timeout: Long = 30_000, condition: () -> Boolean) {
+        try { compose.waitUntil(timeout, condition) }
+        catch (error: ComposeTimeoutException) {
+            throw AssertionError("Expected $expected within ${timeout}ms; observed ${observed()}", error)
+        }
+    }
+
     private fun pickFixture(): String? {
-        compose.waitUntil(30_000) { resumedWith("Add images") }
+        awaitUi("resumed images-only chat with Add images") { resumedWith("Add images") }
         compose.onNodeWithContentDescription("Add images").performClick()
         if (!device.wait(Until.hasObject(By.pkg(pickerPackage)), 20_000)) return "system picker did not open"
 
@@ -92,12 +119,8 @@ class AttachPickerDeviceTest {
         add.click()
         if (!device.wait(Until.gone(By.pkg(pickerPackage)), 15_000)) return "system picker stayed open after Add"
 
-        return try {
-            compose.waitUntil(20_000) { resumedWith("Selected image") }
-            null
-        } catch (_: ComposeTimeoutException) {
-            "the picker closed but MainActivity did not show the selected image"
-        }
+        awaitUi("resumed chat with Selected image", 20_000) { resumedWith("Selected image") }
+        return null
     }
 
     @Test fun d11_realSystemPhotoPickerReturnsThroughMainActivityAndSends() {
@@ -128,8 +151,8 @@ class AttachPickerDeviceTest {
             if (attempt == 1 && device.hasObject(By.pkg(pickerPackage))) {
                 val cancel = device.findObject(By.pkg(pickerPackage).desc("Cancel"))
                 if (cancel == null) device.pressBack() else cancel.click()
-                assertTrue("D11 ${failures.single()}; could not close the picker for retry",
-                    device.wait(Until.gone(By.pkg(pickerPackage)), 15_000))
+                val closed = device.wait(Until.gone(By.pkg(pickerPackage)), 15_000)
+                assertTrue("Expected D11 picker to close for retry after ${failures.single()}; observed pickerPresent=${device.hasObject(By.pkg(pickerPackage))}, ${observed()}", closed)
             }
         }
         if (failure != null) {
@@ -139,7 +162,9 @@ class AttachPickerDeviceTest {
             return
         }
         compose.onNodeWithContentDescription("Send message").performClick()
-        compose.waitUntil(90_000) { control("counts").getJSONObject("committed").getJSONArray("a").length() == baseline + 1 }
+        awaitUi("one committed image message", 90_000) {
+            control("counts").getJSONObject("committed").getJSONArray("a").length() == baseline + 1
+        }
         assertEquals(baseline + 1, control("counts").getJSONObject("committed").getJSONArray("a").length())
         instrumentation.sendStatus(0, Bundle().apply {
             putString(Instrumentation.REPORT_KEY_STREAMRESULT, "ASSERT:D11 PASS\n")
