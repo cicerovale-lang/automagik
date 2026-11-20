@@ -94,7 +94,10 @@ export function createViewCheck(view) {
     const now = performance.now()
     if (now >= nextCheck) {
       nextCheck = now + 1000
-      ready = viewProblem(view, { requireLaunch: true }) === null
+      // No view mounted at all: the gate cannot reach DSH (its launch URL lives there), so its
+      // own pages keep their usual answers. A mounted view must be clean and carry a launch.
+      const mounted = lstatSync(view, { throwIfNoEntry: false }) !== undefined
+      ready = !mounted || viewProblem(view, { requireLaunch: true }) === null
     }
     return ready
   }

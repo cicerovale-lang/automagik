@@ -763,7 +763,8 @@ reason `gate-view-tampered`. DSH removes the published launch URL and profile su
 leaves the unexpected entry untouched. The gate answers requests and upgrades with `503` when
 its view check fails. It caches that verdict for one second. Once the unexpected entry is
 removed, the next DSH health check republishes the profile summary. The gate keeps returning
-`503` until DSH launches again and republishes the launch URL.
+`503` until DSH launches again and republishes the launch URL. A gate with no view mounted at all
+cannot reach DSH and keeps its own pages' usual answers.
 
 An ACP vendor folder can already be a symlink into the view on a tampered volume. A vendor
 sign-in can write there between checks. Checking vendor folders before sign-in belongs in

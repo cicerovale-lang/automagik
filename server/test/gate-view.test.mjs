@@ -512,3 +512,12 @@ test('gate listeners share a one-second verdict for requests and upgrades', asyn
   now = 4000
   assert.equal((await request(gate)).status, 401)
 })
+
+test('with no view mounted the gate keeps its own answers; a mounted view must be clean', t => {
+  const root = mkdtempSync(join(tmpdir(), 'automagik-gate-view-check-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const view = join(root, 'view')
+  assert.equal(createViewCheck(view)(), true, 'no view mounted')
+  mkdirSync(view, { mode: 0o700 })
+  assert.equal(createViewCheck(view)(), false, 'a mounted view without a launch URL')
+})
