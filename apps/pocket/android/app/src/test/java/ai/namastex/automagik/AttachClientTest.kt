@@ -10,6 +10,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
@@ -18,6 +19,7 @@ import java.io.DataInputStream
 import java.io.EOFException
 import java.io.OutputStream
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
@@ -26,7 +28,8 @@ import kotlin.concurrent.thread
 class AttachClientTest {
     private class DelayedBridge(
         hello: JSONObject,
-        private val delayMs: (String) -> Long = { 0 }
+        private val delayMs: (String) -> Long = { 0 },
+        private val result: (String) -> JSONObject? = { null }
     ) : Closeable {
         private val toPhone = Channel<ByteArray>(Channel.UNLIMITED)
         private val fromPhone = Channel<ByteArray>(Channel.UNLIMITED)
@@ -63,7 +66,7 @@ class AttachClientTest {
                         requests.put(rpc)
                         if (method == Attach.METHOD_FINISH) incomingFinish.complete(Unit)
                         replies.schedule({
-                            val response = when (method) {
+                            val response = result(method) ?: when (method) {
                                 "chat.subscribe" -> JSONObject().put("channel", 1)
                                 else -> JSONObject().put("ok", true)
                             }
@@ -92,10 +95,11 @@ class AttachClientTest {
     private fun withBridge(
         hello: JSONObject = offeredHello().put("chat", 1).put("dshWrite", true),
         delayMs: (String) -> Long = { 0 },
+        result: (String) -> JSONObject? = { null },
         test: suspend CoroutineScope.(DelayedBridge, CoreClient) -> Unit
     ) = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        val bridge = DelayedBridge(hello, delayMs)
+        val bridge = DelayedBridge(hello, delayMs, result)
         val core = bridge.client(scope)
         try { withTimeout(8_000) { test(bridge, core) } }
         finally { core.close(); scope.cancel() }
@@ -219,4 +223,102 @@ class AttachClientTest {
             finish.await()
             assertEquals(listOf("list", "finish"), finished.toList())
         }
+    @Test fun documentHelloRequiresAttachmentsAndIgnoresUnsolicitedGrants() {
+        val terminal = "dsh:bot"
+        for (attachments in listOf(false, true)) withBridge(documentHello().put("chat", 1).put("dshWrite", true)) { bridge, core ->
+            val chat = ChatClient.start(core, attachments = attachments, documents = !attachments)
+            val hello = bridge.greeting.await()
+            assertFalse(hello.has("documents"))
+            assertEquals(attachments, hello.has("attachments"))
+            assertNull((chat.attach as? Attach.Peer.Offered)?.offer?.documents)
+            chat.subscribe(terminal, null, {}, {})
+            assertEquals("chat.subscribe", bridge.next().getString("method"))
+            assertEquals("unsupported", chat.attachBegin(terminal, "doc", Attach.TXT, 5).getString("reason"))
+            assertEquals("invalid", chat.attachBegin(terminal, "named", Attach.PNG, 5, "sample.txt").getString("reason"))
+            assertTrue(bridge.requests.isEmpty())
+            if (attachments) {
+                chat.attachBegin(terminal, "image", Attach.PNG, 5)
+                assertEquals("image", bridge.next().getJSONObject("params").getString("upload"))
+            }
+        }
+    }
+
+    @Test fun documentBeginsRequireLiveWatchTypeAndCapAndOnlySendSuppliedNames() =
+        withBridge(documentHello(JSONArray(listOf(Attach.TXT)), 5).put("chat", 1).put("dshWrite", true)) { bridge, core ->
+            val chat = ChatClient.start(core, attachments = true, documents = true)
+            val hello = bridge.greeting.await()
+            assertEquals(setOf("generation", "framed", "attachments", "documents"), hello.keys().asSequence().toSet())
+            assertEquals(1, hello.getInt("attachments"))
+            assertEquals(1, hello.getInt("documents"))
+            val terminal = "dsh:bot"
+            assertEquals("unsupported", chat.attachBegin(terminal, "unwatched", Attach.TXT, 5).getString("reason"))
+            chat.subscribe(terminal, null, {}, {})
+            assertEquals("chat.subscribe", bridge.next().getString("method"))
+            val refusals = mapOf(
+                (Attach.PDF to 5) to "unsupported", (Attach.TXT to 6) to "too-large",
+                (Attach.TXT to 0) to "too-large", (Attach.PNG to 5) to "invalid"
+            )
+            for ((item, reason) in refusals) {
+                val (type, length) = item
+                assertEquals(reason, chat.attachBegin(terminal, "refused", type, length, "sample.txt").getString("reason"))
+            }
+            assertTrue(bridge.requests.isEmpty())
+            for (name in listOf("sample.TxT", null)) {
+                chat.attachBegin(terminal, "doc", Attach.TXT, 5, name)
+                val begin = bridge.next()
+                assertEquals(Attach.METHOD_BEGIN, begin.getString("method"))
+                val params = begin.getJSONObject("params")
+                val keys = setOf("terminal", "upload", "mediaType", "bytes")
+                assertEquals(if (name == null) keys else keys + "name", params.keys().asSequence().toSet())
+                assertEquals(5, params.getInt("bytes"))
+                if (name != null) assertEquals(name, params.getString("name"))
+            }
+        }
+
+    @Test fun aStoreRefusalWithdrawsTheClientGrantBeforeTheNextBegin() =
+        withBridge(documentHello().put("chat", 1).put("dshWrite", true), result = {
+            if (it == Attach.METHOD_FINISH) attachRefusal("unsupported", Attach.FILES_UNSUPPORTED) else null
+        }) { bridge, core ->
+            val chat = ChatClient.start(core, attachments = true, documents = true)
+            val terminal = "dsh:bot"
+            chat.subscribe(terminal, null, {}, {})
+            assertEquals("chat.subscribe", bridge.next().getString("method"))
+            chat.attachFinish(terminal, "doc")
+            assertEquals(Attach.METHOD_FINISH, bridge.next().getString("method"))
+            assertNull((chat.attach as Attach.Peer.Offered).offer.documents)
+            assertEquals("unsupported", chat.attachBegin(terminal, "blocked", Attach.TXT, 5).getString("reason"))
+            chat.attachBegin(terminal, "image", Attach.PNG, 5)
+            assertEquals("image", bridge.next().getJSONObject("params").getString("upload"))
+            assertTrue(bridge.requests.isEmpty())
+        }
+
+    @Test fun anOldSubscriptionRefusalCannotWithdrawTheReplacementGrant() {
+        val release = CountDownLatch(1)
+        withBridge(documentHello().put("chat", 1).put("dshWrite", true), result = {
+            if (it == Attach.METHOD_FINISH) {
+                if (!release.await(5, TimeUnit.SECONDS)) error("The replacement watch did not start")
+                attachRefusal("unsupported", Attach.FILES_UNSUPPORTED)
+            } else null
+        }) { bridge, core ->
+            val chat = ChatClient.start(core, attachments = true, documents = true)
+            val terminal = "dsh:bot"
+            val old = chat.subscribe(terminal, null, {}, {})
+            val finish = async { chat.attachFinish(terminal, "old") }
+            try {
+                bridge.incomingFinish.await()
+                assertEquals("chat.subscribe", bridge.next().getString("method"))
+                assertEquals(Attach.METHOD_FINISH, bridge.next().getString("method"))
+                chat.unsubscribe(old)
+                chat.subscribe(terminal, null, {}, {})
+                assertEquals("chat.subscribe", bridge.next().getString("method"))
+            } finally {
+                release.countDown()
+            }
+            assertEquals(Attach.FILES_UNSUPPORTED, finish.await().getString("code"))
+            assertNotNull((chat.attach as Attach.Peer.Offered).offer.documents)
+            chat.attachBegin(terminal, "doc", Attach.TXT, 5)
+            assertEquals("doc", bridge.next().getJSONObject("params").getString("upload"))
+        }
+    }
+
 }

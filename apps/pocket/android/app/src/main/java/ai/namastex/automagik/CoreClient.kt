@@ -35,10 +35,15 @@ class CoreClient(
     lateinit var hello: JSONObject
         private set
 
-    suspend fun start(manage: JSONArray? = null, attachments: Boolean = false): JSONObject = withContext(Dispatchers.IO) {
+    suspend fun start(
+        manage: JSONArray? = null, attachments: Boolean = false, documents: Boolean = false
+    ): JSONObject = withContext(Dispatchers.IO) {
         val params = JSONObject().put("framed", true).put("generation", 1)
         if (manage != null && manage.length() > 0) params.put("manage", manage)
-        if (attachments) params.put("attachments", 1)
+        if (attachments) {
+            params.put("attachments", 1)
+            if (documents) params.put("documents", 1)
+        }
         val request = JSONObject().put("jsonrpc", "2.0").put("id", 0).put("method", "hello").put("params", params)
         synchronized(output) { output.write((request.toString() + "\n").toByteArray()); output.flush() }
         val line = java.io.ByteArrayOutputStream()

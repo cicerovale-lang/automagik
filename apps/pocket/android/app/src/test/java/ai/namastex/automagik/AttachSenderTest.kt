@@ -245,3 +245,145 @@ class AttachSenderTest {
         assertEquals("too large for the computer", Attach.words("rejected", "IMAGE_TOO_MANY_PIXELS"))
     }
 }
+
+internal fun testDocumentOffer(cap: Int = 8_388_608) = testOffer().copy(documents = testDocuments(cap))
+
+internal fun fakeDocument(bytes: ByteArray = "notes".toByteArray(), name: String? = "sample.TxT") =
+    Prepared("document", "", Attach.TXT, bytes, 0, 0, kind = AttachmentKind.DOCUMENT, name = name)
+
+internal fun fileAdmitted(upload: String, mediaType: String, bytes: Int, name: String): JSONObject =
+    JSONObject().put("ok", true).put("state", "admitted").put("upload", upload)
+        .put("file", JSONObject().put("mediaType", mediaType).put("bytes", bytes).put("name", name))
+
+internal open class DocumentTestLink(offer: Attach.Offer = testDocumentOffer()) : AttachTestLink(Attach.Peer.Offered(offer)) {
+    data class DocumentBegin(val upload: String, val type: String, val length: Int, val name: String?)
+    val documentBegins = CopyOnWriteArrayList<DocumentBegin>()
+
+    init { finish = { admitItem(it) } }
+
+    override suspend fun attachBegin(terminal: String, upload: String, mediaType: String, bytes: Int, name: String?): JSONObject {
+        if (mediaType in Attach.documentTypes) documentBegins += DocumentBegin(upload, mediaType, bytes, name)
+        return super.attachBegin(terminal, upload, mediaType, bytes)
+    }
+
+    fun admitItem(upload: String): JSONObject {
+        val document = documentBegins.find { it.upload == upload } ?: return admit(upload)
+        val leaf = if (document.type == Attach.PDF) "sample.pdf" else "sample.txt"
+        return fileAdmitted(upload, document.type, document.length, leaf)
+    }
+}
+
+class AttachDocumentSenderTest {
+    private val image = prepared("1", 6)
+    private val document = fakeDocument()
+
+    @Test fun finishAcceptsOneMatchingArmAndNormalizedImages() {
+        val offer = testDocumentOffer()
+        val upload = "upload"
+        fun file() = fileAdmitted(upload, Attach.TXT, document.bytes.size, "sample.txt")
+        fun imageReply() = JSONObject().put("ok", true).put("state", "admitted").put("upload", upload)
+            .put("image", JSONObject().put("mediaType", Attach.WEBP).put("width", 1).put("height", 1)
+                .put("bytes", image.bytes.size).put("stored", 4))
+
+        assertTrue(Attach.admitted(file(), upload, document, offer))
+        assertTrue(Attach.admitted(imageReply(), upload, image, offer))
+        assertFalse(Attach.admitted(file(), upload, image, offer))
+        assertFalse(Attach.admitted(imageReply(), upload, document, offer))
+        val invalid = listOf(
+            file().put("image", imageReply().getJSONObject("image")), file().put("image", JSONObject.NULL),
+            file().put("file", JSONObject.NULL), file().put("upload", "other"),
+            file().put("state", "open"), file().put("ok", false)
+        )
+        for (reply in invalid) assertFalse(Attach.admitted(reply, upload, document, offer))
+        assertFalse(Attach.admitted(imageReply().put("file", JSONObject.NULL), upload, image, offer))
+        for ((key, bad) in listOf("mediaType" to Attach.PDF, "bytes" to 6, "name" to 123, "name" to JSONObject.NULL)) {
+            val reply = file()
+            reply.getJSONObject("file").put(key, bad)
+            assertFalse(Attach.admitted(reply, upload, document, offer))
+        }
+    }
+
+    @Test fun finishRejectsPathsControlCharactersBadUtf16AndNoncanonicalExtensions() {
+        val offer = testDocumentOffer()
+        val names = listOf("", "sample.PDF", "sample.TXT", "sample.txt.bak", "a".repeat(125) + ".txt",
+            "folder/sample.txt", "folder\\sample.txt", "sample\u202E.txt", "sample\u0085.txt",
+            "sample\uDB40\uDC01.txt", "\uD800.txt", "\uDC00.txt")
+        for (name in names) assertFalse(Attach.admitted(fileAdmitted("u", Attach.TXT, 5, name), "u", document, offer))
+        for (name in listOf("a".repeat(124) + ".txt", "\u05e9\u05dc\u05d5\u05dd.txt")) {
+            assertTrue(Attach.admitted(fileAdmitted("u", Attach.TXT, 5, name), "u", document, offer))
+        }
+    }
+
+    private suspend fun upload(link: DocumentTestLink): ImageMessage {
+        var message = ImageMessage("message", "caption", listOf(image, document), "session", 1)
+        AttachSender(link, "dsh:bot", testDocumentOffer(), Attempt(1), { true }) { message = it(message) }.upload(message)
+        return message
+    }
+
+    @Test fun mixedUploadsKeepTheirOrderAndUnsupportedUsesTheFailedItemKind() = runTest {
+        val accepted = DocumentTestLink()
+        val message = upload(accepted)
+        val ordered = accepted.calls.filter { it.kind == "begin" }.map { it.id }
+        assertEquals(ordered, accepted.calls.last().uploads)
+        assertEquals(ordered[1], accepted.documentBegins.single().upload)
+        assertEquals(Phase.SENT, message.phase)
+        assertEquals("1 image, 1 file", attachmentCount(message.imageCount, message.fileCount))
+
+        for ((failedPosition, words) in listOf(1 to "the computer couldn't read this image", 2 to "the computer couldn't take this file")) {
+            val link = DocumentTestLink()
+            link.begin = {
+                if (link.calls.count { call -> call.kind == "begin" } == failedPosition) attachRefusal("unsupported")
+                else link.open(it)
+            }
+            val failed = upload(link)
+            assertEquals(Phase.STOPPED, failed.phase)
+            assertEquals("attach", failed.failedOperation)
+            assertEquals(if (failedPosition == 1) AttachmentKind.IMAGE else AttachmentKind.DOCUMENT, failed.failedKind)
+            assertEquals(words, Attach.words(failed))
+            assertEquals("", failed.marker)
+            assertTrue(link.calls.none { it.kind == "send" })
+        }
+    }
+
+    @Test fun documentRefusalsUseAllowlistedWordsAndDistinguishNameFromCaption() = runTest {
+        val cases = listOf(
+            Triple("rejected", "timeout", "the computer took too long to take the file"),
+            Triple("rejected", null, "the computer refused this file"),
+            Triple("unavailable", null, "the computer couldn't take this file right now"),
+            Triple("expired", "FILE_NOT_STAGED", "the files expired on the computer"),
+            Triple("quota", null, "the computer takes no more attachments now (daily limit or low disk); try later"),
+            Triple("unsupported", Attach.FILES_UNSUPPORTED, "the computer doesn't take files"),
+            Triple("unsupported", "SUBAGENT_FILE_UNSUPPORTED", "this Bot can't take files now")
+        )
+        for ((reason, code, words) in cases) {
+            val link = DocumentTestLink()
+            link.finish = {
+                if (link.documentBegins.any { doc -> doc.upload == it }) attachRefusal(reason, code)
+                else link.admitItem(it)
+            }
+            val failed = upload(link)
+            assertEquals(words, Attach.words(failed))
+            assertEquals("", failed.marker)
+        }
+
+        val name = DocumentTestLink()
+        name.begin = {
+            if (name.documentBegins.any { doc -> doc.upload == it }) attachRefusal("invalid").put("message", "sign-in-code")
+            else name.open(it)
+        }
+        val named = upload(name)
+        assertEquals("sign-in-code", named.marker)
+        assertEquals("the file name looks like a sign-in code; rename the file", Attach.words(named))
+
+        val send = DocumentTestLink().apply { sendImage = { attachRefusal("invalid").put("message", "sign-in-code") } }
+        val caption = upload(send)
+        assertEquals("send", caption.failedOperation)
+        assertEquals("sign-in-code", caption.marker)
+        assertEquals("the message looks like a sign-in code; edit it", Attach.words(caption))
+
+        val model = upload(DocumentTestLink().apply { sendImage = { attachRefusal("rejected", "MODEL_DOES_NOT_SUPPORT_IMAGES") } })
+        assertEquals(AttachmentKind.IMAGE, model.failedKind)
+        assertEquals("this Bot's model can't read images", Attach.words(model))
+        assertEquals("", model.marker)
+    }
+}

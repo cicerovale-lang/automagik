@@ -421,4 +421,382 @@ class AttachSessionTest {
         r.session.show(item, block); runCurrent()
         assertEquals("This image is no longer on the computer.", r.notices.last())
     }
+    private fun Run.pickDocuments(vararg uris: String) {
+        val pick = checkNotNull(session.pick(AttachmentKind.DOCUMENT))
+        session.picked(pick.kind, pick.token, uris.map(Uri::parse))
+    }
+
+    @Test fun multipleDocumentResultsKeepPickerOrderAndCancellationLeavesDraftUntouched() = runTest {
+        val r = Run(this, testDocumentOffer())
+        val link = DocumentTestLink()
+        r.reconnect(link)
+        val selected = listOf("content://fixture/third", "content://fixture/first", "content://fixture/second")
+        val read = mutableListOf<String>()
+        r.session.prepareDocument = { uri, _, _ ->
+            read += uri.toString()
+            fakeDocument(bytes = uri.lastPathSegment!!.toByteArray()).copy(key = uri.toString())
+        }
+        val pick = checkNotNull(r.session.pick(AttachmentKind.DOCUMENT))
+        assertEquals(4, pick.slots)
+        r.session.picked(pick.kind, pick.token, selected.map(Uri::parse))
+        runCurrent()
+        assertEquals(selected, read)
+        assertEquals(selected, r.state.draft.map { it.key })
+
+        val draft = r.state.draft
+        val notices = r.notices.toList()
+        val cancel = checkNotNull(r.session.pick(AttachmentKind.DOCUMENT))
+        assertEquals(1, cancel.slots)
+        r.session.picked(cancel.kind, cancel.token, emptyList())
+        runCurrent()
+        assertEquals(draft, r.state.draft)
+        assertEquals(notices, r.notices)
+        assertNull(r.state.pendingPick)
+        assertNull(r.state.waiting)
+
+        assertEquals(Submit.Accepted, r.session.submit("ordered"))
+        runCurrent()
+        assertEquals(Phase.SENT, r.message.phase)
+        val begins = link.documentBegins.map { it.upload }
+        assertEquals(3, begins.size)
+        assertEquals(begins, link.calls.single { it.kind == "send" }.uploads)
+        val chunks = link.calls.filter { it.kind == "chunk" }
+        assertEquals(begins, chunks.map { it.id })
+        for (index in selected.indices) {
+            assertArrayEquals(selected[index].substringAfterLast('/').toByteArray(), chunks[index].data)
+        }
+    }
+
+    @Test fun existingDocumentsAreNeverReopenedWhenOnlyImagesNeedRepreparing() = runTest {
+        val initial = testDocumentOffer()
+        val cases = listOf(
+            initial.copy(fileBytes = 12, documents = testDocuments(4)),
+            initial.copy(fileBytes = 12, documents = null),
+            initial.copy(fileBytes = 12, documents = testDocuments(types = setOf(Attach.PDF))),
+            initial
+        )
+        for (offer in cases) {
+            val r = Run(this, initial)
+            var imageReads = 0
+            var documentReads = 0
+            val document = fakeDocument()
+            r.preparer = { uri, o -> imageReads++; fakePrepared(uri, minOf(20, o.fileBytes)) }
+            r.session.prepareDocument = { _, _, _ -> documentReads++; document }
+            r.watch()
+            r.pick(); runCurrent()
+            r.pickDocuments("content://fixture/doc"); runCurrent()
+
+            val replacement = DocumentTestLink(offer)
+            r.reconnect(replacement); runCurrent()
+            assertSame(document, r.state.draft[1])
+            assertEquals(listOf(minOf(20, offer.fileBytes), 5), r.state.draft.map { it.bytes.size })
+            assertEquals(1, documentReads)
+            assertEquals(if (offer == initial) 1 else 2, imageReads)
+            if (offer == initial) {
+                assertEquals(Submit.Accepted, r.session.submit("caption"))
+                runCurrent()
+                assertEquals(Phase.SENT, r.message.phase)
+            } else {
+                assertEquals(AttachDocument.DOES_NOT_FIT, r.notices.last())
+                assertEquals(Submit.Refused(AttachDocument.DOES_NOT_FIT), r.session.submit("caption"))
+                assertEquals(2, r.state.draft.size)
+                assertTrue(replacement.calls.isEmpty())
+            }
+            assertEquals(1, documentReads)
+        }
+    }
+
+    @Test fun invalidatedDocumentsInStoppedMessagesRemainHeldAndStartNoUpload() = runTest {
+        val r = Run(this, testDocumentOffer())
+        val first = DocumentTestLink().apply { begin = { attachRefusal("quota") } }
+        r.reconnect(first)
+        var reads = 0
+        r.session.prepareDocument = { _, _, _ -> reads++; fakeDocument() }
+        r.pickDocuments("content://fixture/doc"); runCurrent()
+        assertEquals(Submit.Accepted, r.session.submit("caption")); runCurrent()
+        val stopped = r.message
+        val imagesOnly = AttachTestLink()
+        r.reconnect(imagesOnly)
+        r.session.retry(stopped.id); runCurrent()
+        assertEquals(AttachDocument.DOES_NOT_FIT, r.notices.last())
+        assertEquals(stopped.id, r.message.id)
+        assertSame(stopped.images.single(), r.message.images.single())
+        assertEquals("caption", r.message.caption)
+        assertEquals(1, reads)
+        assertTrue(imagesOnly.calls.isEmpty())
+    }
+
+    @Test fun tinyUnknownLengthFileChargesAndUploadsOnlyItsActualFiveBytes() = runTest {
+        val r = Run(this, testDocumentOffer())
+        val link = DocumentTestLink()
+        r.reconnect(link)
+        val bytes = "notes".toByteArray()
+        val document = AttachDocument({ null }, { Attach.TXT }, { bytes.inputStream() })
+        r.session.prepareDocument = { uri, offer, stillAllowed -> document.prepare(uri, offer, stillAllowed) }
+        r.pickDocuments("content://fixture/doc"); runCurrent()
+        assertEquals(5L, r.state.heldBytes)
+        assertEquals(Submit.Accepted, r.session.submit("")); runCurrent()
+        assertEquals(5, link.documentBegins.single().length)
+        assertNull(link.documentBegins.single().name)
+        assertArrayEquals(bytes, link.calls.single { it.kind == "chunk" }.data)
+        assertEquals(Phase.SENT, r.message.phase)
+        assertEquals(0L, r.state.heldBytes)
+        assertEquals(1, r.message.fileCount)
+    }
+
+    @Test fun preparationReservesDocumentCapPlusOneBeforeCallingTheProvider() = runTest {
+        val r = Run(this, testDocumentOffer())
+        r.watch()
+        r.preparer = { uri, _ -> fakePrepared(uri, 8_388_608) }
+        var reads = 0
+        r.session.prepareDocument = { _, _, _ -> reads++; fakeDocument() }
+        r.pick(3); runCurrent()
+        r.pickDocuments("content://fixture/doc"); runCurrent()
+        assertEquals(0, reads)
+        assertEquals(3, r.state.draft.size)
+        assertTrue(r.notices.last().startsWith("Too many pictures"))
+        r.session.removeDraft(r.state.draft.last().key)
+        r.pickDocuments("content://fixture/doc"); runCurrent()
+        assertEquals(1, reads)
+        assertEquals(16_777_221L, r.state.heldBytes)
+    }
+
+    @Test fun sharedCountOriginalBytesAndRawCaptionAreCheckedBeforeBegin() = runTest {
+        val offer = testDocumentOffer().copy(files = 2, fileBytes = 5, messageBytes = 8)
+        val r = Run(this, offer)
+        val link = DocumentTestLink(offer)
+        r.reconnect(link)
+        r.preparer = { uri, _ -> fakePrepared(uri, 4) }
+        val read = mutableListOf<String>()
+        r.session.prepareDocument = { uri, _, _ ->
+            read += uri.toString()
+            fakeDocument()
+        }
+        r.pick(); runCurrent()
+        r.pickDocuments("content://fixture/first", "content://fixture/excess"); runCurrent()
+        assertEquals(listOf("content://fixture/first"), read)
+        assertEquals("Added the first 1 (up to 2 per message).", r.notices.last())
+        assertTrue(r.session.submit("caption") is Submit.Refused)
+        assertEquals(2, r.state.draft.size)
+        assertTrue(link.calls.isEmpty())
+
+        val smaller = DocumentTestLink(offer.copy(files = 1, messageBytes = 12))
+        r.reconnect(smaller)
+        assertTrue(r.session.submit("caption") is Submit.Refused)
+        assertTrue(smaller.calls.isEmpty())
+        r.session.removeDraft(r.state.draft.first().key)
+        val raw = "​".repeat(10_923)
+        assertTrue(r.session.submit(raw) is Submit.Refused)
+        assertEquals(1, r.state.draft.size)
+        assertTrue(smaller.calls.isEmpty())
+        assertEquals(Submit.Accepted, r.session.submit("é".repeat(16_384))); runCurrent()
+        assertEquals(Phase.SENT, r.message.phase)
+    }
+
+    @Test fun documentStoreWithdrawalIsVisibleDuringCleanupAndSubagentRefusalIsLocal() = runTest {
+        for (stage in listOf("begin", "chunk", "finish")) {
+            val r = Run(this, testDocumentOffer())
+            val cleanup = CompletableDeferred<Unit>()
+            val link = object : DocumentTestLink() {
+                override suspend fun attachCancel(terminal: String, upload: String): JSONObject {
+                    val reply = super.attachCancel(terminal, upload)
+                    cleanup.await()
+                    return reply
+                }
+            }
+            fun refused() = attachRefusal("unsupported", Attach.FILES_UNSUPPORTED)
+            when (stage) {
+                "begin" -> link.begin = { refused() }
+                "chunk" -> link.chunk = { _, _, _ -> refused() }
+                "finish" -> link.finish = { refused() }
+            }
+            r.reconnect(link)
+            r.session.prepareDocument = { _, _, _ -> fakeDocument() }
+            r.pickDocuments("content://fixture/doc"); runCurrent()
+            r.session.submit(""); runCurrent()
+            assertEquals(Phase.UPLOADING, r.message.phase)
+            assertEquals("cancel", link.calls.last().kind)
+            assertEquals(testOffer(), (r.state.peer as Attach.Peer.Offered).offer)
+            cleanup.complete(Unit); runCurrent()
+            assertEquals(Phase.STOPPED, r.message.phase)
+        }
+        val r = Run(this, testDocumentOffer())
+        val subagent = DocumentTestLink().apply { finish = { attachRefusal("unsupported", "SUBAGENT_FILE_UNSUPPORTED") } }
+        r.reconnect(subagent)
+        r.session.prepareDocument = { _, _, _ -> fakeDocument() }
+        r.pickDocuments("content://fixture/doc"); runCurrent()
+        r.session.submit(""); runCurrent()
+        assertNotNull((r.state.peer as Attach.Peer.Offered).offer.documents)
+        assertEquals("this Bot can't take files now", Attach.words(r.message))
+    }
+
+    @Test fun staleStoreRefusalsCannotHideDocumentsOnReplacementWatchOrLink() = runTest {
+        for (replaceLink in listOf(false, true)) {
+            val r = Run(this, testDocumentOffer())
+            val old = DocumentTestLink()
+            val finish = CompletableDeferred<JSONObject>()
+            old.finish = { finish.await() }
+            r.reconnect(old)
+            r.session.prepareDocument = { _, _, _ -> fakeDocument() }
+            r.pickDocuments("content://fixture/doc"); runCurrent()
+            r.session.submit(""); runCurrent()
+            if (replaceLink) r.reconnect(DocumentTestLink()) else r.watch()
+            finish.complete(attachRefusal("unsupported", Attach.FILES_UNSUPPORTED)); runCurrent()
+            assertNotNull((r.state.peer as Attach.Peer.Offered).offer.documents)
+            assertEquals(listOf("begin", "chunk", "finish", "cancel"), old.calls.map { it.kind })
+        }
+    }
+
+    @Test fun lostWrittenDocumentFinishStopsAndRetriesWithFreshIdsAndRetainedBytes() = runTest {
+        val r = Run(this, testDocumentOffer())
+        val link = DocumentTestLink()
+        r.reconnect(link)
+        var reads = 0
+        val document = fakeDocument()
+        r.session.prepareDocument = { _, _, _ -> reads++; document }
+        r.pickDocuments("content://fixture/doc"); runCurrent()
+        link.finish = { JSONObject().put("ok", false).put("state", "unknown") }
+        assertEquals(Submit.Accepted, r.session.submit("caption")); runCurrent()
+        val stopped = r.message
+        assertEquals(Phase.STOPPED, stopped.phase)
+        assertTrue(uploadLine(stopped, r.session).startsWith("Not sent"))
+        assertSame(document, stopped.images.single())
+        assertEquals(listOf("begin", "chunk", "finish", "cancel"), link.calls.map { it.kind })
+        link.finish = { link.admitItem(it) }
+        r.session.retry(stopped.id); runCurrent()
+        assertEquals(1, reads)
+        assertEquals(Phase.SENT, r.message.phase)
+        assertNotEquals(link.documentBegins[0].upload, link.documentBegins[1].upload)
+        assertEquals(listOf(stopped.id), link.calls.filter { it.kind == "send" }.map { it.id })
+        for (chunk in link.calls.filter { it.kind == "chunk" }) assertArrayEquals(document.bytes, chunk.data)
+    }
+
+    @Test fun thrownDocumentFinishAfterWriteStopsAndRetriesFromTheRetainedBuffer() = runTest {
+        val r = Run(this, testDocumentOffer())
+        val link = DocumentTestLink()
+        r.reconnect(link)
+        val original = fakeDocument(bytes = "exact bytes".toByteArray())
+        var reads = 0
+        r.session.prepareDocument = { _, _, _ -> reads++; original }
+        r.pickDocuments("content://fixture/doc"); runCurrent()
+        link.finish = { throw java.io.IOException("reply lost after write") }
+        assertEquals(Submit.Accepted, r.session.submit("caption"))
+        runCurrent()
+        val stopped = r.message
+        assertEquals(Phase.STOPPED, stopped.phase)
+        assertEquals(AttachAction.RETRY, stopped.action)
+        assertSame(original, stopped.images.single())
+        assertEquals(listOf("begin", "chunk", "finish", "cancel"), link.calls.map { it.kind })
+        assertTrue(link.calls.none { it.kind == "send" })
+
+        link.finish = { link.admitItem(it) }
+        r.session.retry(stopped.id)
+        runCurrent()
+        assertEquals(Phase.SENT, r.message.phase)
+        assertEquals(1, reads)
+        assertNotEquals(link.documentBegins[0].upload, link.documentBegins[1].upload)
+        assertEquals(listOf(stopped.id), link.calls.filter { it.kind == "send" }.map { it.id })
+        for (chunk in link.calls.filter { it.kind == "chunk" }) assertArrayEquals(original.bytes, chunk.data)
+    }
+
+    @Test fun mixedMaybeReplaysExactManifestOnImagesOnlyWatchEvenAfterEviction() = runTest {
+        val r = Run(this, testDocumentOffer())
+        val first = DocumentTestLink().apply { sendImage = { JSONObject() } }
+        r.reconnect(first)
+        r.preparer = { uri, _ -> fakePrepared(uri, 8_388_608) }
+        r.session.prepareDocument = { _, _, _ -> fakeDocument() }
+        r.pick(); runCurrent()
+        r.pickDocuments("content://fixture/doc"); runCurrent()
+        r.session.submit(" caption "); runCurrent()
+        val original = first.calls.last()
+        assertEquals(Phase.MAYBE, r.message.phase)
+        r.pick(3); runCurrent()
+        assertTrue(r.message.images.isEmpty())
+        assertEquals(2, r.message.count)
+        assertEquals("1 image, 1 file", attachmentCount(r.message.imageCount, r.message.fileCount))
+        val imagesOnly = AttachTestLink().apply { sendImage = { attachRefusal("unsupported") } }
+        r.reconnect(imagesOnly)
+        r.session.retry(original.id); runCurrent()
+        assertEquals(listOf(original), imagesOnly.calls)
+        assertEquals(Phase.MAYBE, r.message.phase)
+        assertTrue(r.message.uncertain)
+        assertEquals("unsupported", r.message.reason)
+        assertEquals("Maybe not sent. The retry was refused: the computer couldn't take this file.", uploadLine(r.message, r.session))
+    }
+
+    @Test fun documentManifestRefusalsKeepMaybeAndRequireConfirmationBeforeNewSend() = runTest {
+        for ((reason, code) in listOf("session-changed" to null, "changed" to null, "expired" to "FILE_NOT_STAGED")) {
+            val r = Run(this, testDocumentOffer())
+            val initial = DocumentTestLink().apply { sendImage = { JSONObject() } }
+            r.reconnect(initial)
+            var reads = 0
+            r.session.prepareDocument = { _, _, _ -> reads++; fakeDocument() }
+            r.pickDocuments("content://fixture/doc"); runCurrent()
+            r.session.submit("original caption"); runCurrent()
+            val original = initial.calls.last()
+            val replacement = DocumentTestLink().apply { sendImage = { attachRefusal(reason, code) } }
+            r.reconnect(replacement, if (reason == "session-changed") "other" else "a")
+            r.session.retry(original.id); runCurrent()
+            assertEquals(listOf(original), replacement.calls)
+            assertEquals(Phase.MAYBE, r.message.phase)
+            assertEquals(reason, r.message.reason)
+            assertEquals(code.orEmpty(), r.message.code)
+            assertEquals(AttachAction.SEND_AGAIN, r.message.action)
+            r.session.retry(original.id); runCurrent()
+            assertEquals(listOf(original), replacement.calls)
+
+            replacement.sendImage = { attachSuccess(it) }
+            r.session.retry(original.id, confirmed = true); runCurrent()
+            val new = replacement.calls.last()
+            assertNotEquals(original.id, new.id)
+            assertNotEquals(original.uploads, new.uploads)
+            assertEquals(original.caption, new.caption)
+            assertEquals(Phase.SENT, r.message.phase)
+            assertEquals(1, reads)
+        }
+    }
+
+    @Test fun withdrawalWhileAFreshAttemptAwaitsCleanupPreventsEveryNewBegin() = runTest {
+        val r = Run(this, testDocumentOffer())
+        val cleanup = CompletableDeferred<Unit>()
+        val chunk = CompletableDeferred<JSONObject>()
+        val link = object : DocumentTestLink() {
+            override suspend fun attachCancel(terminal: String, upload: String): JSONObject {
+                val reply = super.attachCancel(terminal, upload)
+                cleanup.await()
+                return reply
+            }
+        }
+        link.chunk = { _, _, _ -> chunk.await() }
+        r.reconnect(link)
+        r.session.prepareDocument = { _, _, _ -> fakeDocument() }
+        r.pickDocuments("content://fixture/doc"); runCurrent()
+        r.session.submit(""); runCurrent()
+        assertTrue(r.session.cancel(r.message.id, restore = true))
+        assertEquals(Submit.Accepted, r.session.submit("second"))
+        runCurrent()
+        chunk.complete(attachRefusal("unsupported", Attach.FILES_UNSUPPORTED)); runCurrent()
+        assertNull((r.state.peer as Attach.Peer.Offered).offer.documents)
+        cleanup.complete(Unit); runCurrent()
+        assertEquals(listOf("begin", "chunk", "cancel"), link.calls.map { it.kind })
+        assertEquals(Phase.STOPPED, r.message.phase)
+        assertEquals("second", r.message.caption)
+        assertEquals(1, r.message.images.size)
+        assertEquals(AttachDocument.DOES_NOT_FIT, r.notices.last())
+    }
+
+    @Test fun refusedDocumentContentNeverReachesBegin() = runTest {
+        val r = Run(this, testDocumentOffer())
+        val link = DocumentTestLink()
+        r.reconnect(link)
+        for ((type, bytes) in listOf(Attach.TXT to byteArrayOf(65, 0), Attach.PDF to "bogus".toByteArray())) {
+            val document = AttachDocument({ null }, { type }, { bytes.inputStream() })
+            r.session.prepareDocument = { uri, offer, stillAllowed -> document.prepare(uri, offer, stillAllowed) }
+            r.pickDocuments("content://fixture/doc"); runCurrent()
+            assertTrue(r.state.draft.isEmpty())
+            assertTrue(link.calls.isEmpty())
+            assertEquals("The computer can't take this file: it isn't a valid TXT/PDF.", r.notices.last())
+        }
+    }
+
 }

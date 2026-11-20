@@ -242,4 +242,73 @@ class ChatAttachRenderTest {
         mount(AttachTestLink(), ref, attachRow("dsh:s:1").put("blocks", JSONArray()))
         compose.onNodeWithTag("chat-attachment-row").assertDoesNotExist()
     }
+    @Test fun documentOfferShowsPhotosAndFilesWithTheDocumentAddDescription() {
+        mount(DocumentTestLink())
+        add().assertDoesNotExist()
+        compose.onNodeWithContentDescription("Add images or files").assertWidthIsEqualTo(48.dp).performClick()
+        compose.onNodeWithText("Photos").assertExists()
+        compose.onNodeWithText("Files").assertExists()
+    }
+
+    @Test fun documentTrayShowsOnlyFinalAsciiSuffixSizeAndAccessibleRemoval() {
+        mount(DocumentTestLink())
+        val names = listOf("שלום‮.TxT", "sample.pdf.backup")
+        val paths = listOf("content://fixture/1", "content://fixture/2").map(Uri::parse)
+        vm.attachments.prepareDocument = { picked, _, _ ->
+            val index = paths.indexOf(picked)
+            fakeDocument(name = names[index]).copy(key = "file-$index")
+        }
+        pick(uri)
+        waitFor { vm.attachments.state.value.draft.size == 1 && vm.attachments.state.value.preparing == 0 }
+        compose.runOnIdle {
+            val document = checkNotNull(vm.attachments.pick(AttachmentKind.DOCUMENT))
+            deliverAttachPick(vm.attachments, document.kind, document.token, paths)
+        }
+        waitFor { vm.attachments.state.value.draft.size == 3 }
+        compose.onNodeWithText("TXT").assertExists()
+        compose.onNodeWithText("File").assertExists()
+        compose.onNodeWithText("1 image, 2 files · 14 B").assertExists()
+        for (name in names) compose.onNodeWithText(name, substring = true).assertDoesNotExist()
+        compose.onNodeWithContentDescription("Remove image").assertExists()
+        compose.onNodeWithContentDescription("Remove file 1 of 2").performClick()
+        compose.onNodeWithText("TXT").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Remove file 1 of 1").assertExists()
+        compose.onNodeWithText("1 image, 1 file · 9 B").assertExists()
+    }
+
+    @Test fun uncertainDocumentSendAsNewRequiresTheDialogConfirmation() {
+        val link = DocumentTestLink()
+        link.sendImage = { id ->
+            when (link.calls.count { it.kind == "send" }) {
+                1 -> JSONObject()
+                2 -> attachRefusal("session-changed")
+                else -> attachSuccess(id)
+            }
+        }
+        mount(link)
+        vm.attachments.prepareDocument = { _, _, _ -> fakeDocument() }
+        compose.runOnIdle {
+            val doc = checkNotNull(vm.attachments.pick(AttachmentKind.DOCUMENT))
+            deliverAttachPick(vm.attachments, doc.kind, doc.token, listOf(uri))
+        }
+        waitFor { vm.attachments.state.value.draft.isNotEmpty() }
+        send().performClick()
+        waitFor { vm.attachments.state.value.messages.singleOrNull()?.phase == Phase.MAYBE }
+        compose.onNodeWithText("Retry").performClick()
+        waitFor { vm.attachments.state.value.messages.singleOrNull()?.reason == "session-changed" }
+        compose.onNodeWithText("Send as new").performClick()
+        compose.onNodeWithText("Send as a new message?").assertExists()
+        compose.onNodeWithText("Cancel").performClick()
+        assertEquals(1, link.documentBegins.size)
+
+        compose.onNodeWithText("Send as new").performClick()
+        compose.onNodeWithText("Send").performClick()
+        waitFor { vm.attachments.state.value.messages.singleOrNull()?.phase == Phase.SENT }
+        val sends = link.calls.filter { it.kind == "send" }
+        assertEquals(sends[0], sends[1])
+        assertNotEquals(sends[0].id, sends[2].id)
+        assertNotEquals(sends[0].uploads, sends[2].uploads)
+        assertEquals(2, link.documentBegins.size)
+    }
+
 }

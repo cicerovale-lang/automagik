@@ -77,3 +77,35 @@ class AttachOfferTest {
     }
 
 }
+
+internal fun testDocuments(cap: Int = 8_388_608, types: Set<String> = setOf(Attach.TXT, Attach.PDF)) =
+    Attach.DocumentOffer(types, cap)
+
+internal fun documentHello(types: Any = JSONArray(listOf(Attach.TXT, Attach.PDF)), cap: Any = 8_388_608) =
+    offeredHello().apply {
+        getJSONObject("attachments").put("documents", JSONObject().put("mediaTypes", types)
+            .put("limits", JSONObject().put("fileBytes", cap)))
+    }
+
+class AttachDocumentOfferTest {
+    private fun offer(hello: JSONObject, documents: Boolean = true) =
+        (Attach.peer(hello, documents) as Attach.Peer.Offered).offer
+
+    @Test fun documentOfferRequiresOptInAndClampsAfterIntersecting() {
+        val hello = documentHello(JSONArray(listOf(Attach.TXT, "text/html", Attach.TXT)), 9_007_199_254_740_991L)
+        assertEquals(testOffer(), offer(hello, documents = false))
+        assertEquals(testOffer().copy(documents = testDocuments(types = setOf(Attach.TXT))), offer(hello))
+        assertEquals(testDocuments(7, setOf(Attach.PDF)), offer(documentHello(JSONArray(listOf(Attach.PDF)), 7)).documents)
+    }
+
+    @Test fun missingAndMalformedDocumentsLeaveTheImageOfferUsable() {
+        val invalid = listOf(
+            offeredHello(), documentHello("text/plain"), documentHello(JSONArray()), documentHello(JSONArray(listOf("text/html"))),
+            documentHello(cap = 0), documentHello(cap = -1), documentHello(cap = 42.0), documentHello(cap = "42"),
+            documentHello(cap = 9_007_199_254_740_992L),
+            offeredHello().apply { getJSONObject("attachments").put("documents", JSONObject.NULL) },
+            documentHello().apply { getJSONObject("attachments").getJSONObject("documents").remove("limits") }
+        )
+        for (hello in invalid) assertEquals(testOffer(), offer(hello))
+    }
+}

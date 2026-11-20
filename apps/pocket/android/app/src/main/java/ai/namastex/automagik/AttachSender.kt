@@ -19,7 +19,10 @@ internal data class ImageMessage(
     val count: Int = images.size, val continuity: Boolean = true, val phase: Phase = Phase.UPLOADING,
     val uploads: List<String> = emptyList(), val progress: Float = 0f, val done: Int = 0,
     val reason: String = "", val code: String = "", val sendWritten: Boolean = false,
-    val uncertain: Boolean = false, val action: AttachAction = AttachAction.NONE
+    val uncertain: Boolean = false, val action: AttachAction = AttachAction.NONE,
+    val marker: String = "", val failedOperation: String = "", val failedKind: AttachmentKind? = null,
+    val imageCount: Int = images.count { it.kind == AttachmentKind.IMAGE },
+    val fileCount: Int = images.count { it.kind == AttachmentKind.DOCUMENT }
 ) {
     val active get() = phase == Phase.UPLOADING || phase == Phase.SENDING
     val heldBytes get() = images.sumOf { it.heldBytes }
@@ -42,6 +45,7 @@ internal class Attempt(val token: Long, initial: Phase = Phase.UPLOADING) {
 internal class AttachSender(
     private val link: ChatLink, private val terminal: String, private val offer: Attach.Offer,
     private val attempt: Attempt, private val live: (Long) -> Boolean,
+    private val withdrawDocuments: () -> Unit = {},
     private val publish: ((ImageMessage) -> ImageMessage) -> Unit
 ) {
     private fun uploading() = attempt.phase.get() == Phase.UPLOADING && live(attempt.token)
@@ -52,11 +56,14 @@ internal class AttachSender(
         val failure = try {
             var stopped: Failure? = null
             for (image in message.images) {
-                stopped = uploadImage(image) { n ->
+                stopped = uploadItem(image) { n ->
                     acked += n
                     publish { it.copy(progress = acked.toFloat() / total) }
                 }
-                if (stopped != null) break
+                if (stopped != null) {
+                    stopped = stopped.copy(operation = "attach", kind = image.kind)
+                    break
+                }
                 publish { it.copy(done = attempt.admitted.size) }
             }
             if (stopped == null && synchronized(attempt.lock) {
@@ -74,10 +81,11 @@ internal class AttachSender(
         }
         cleanup()
         if (attempt.phase.compareAndSet(Phase.UPLOADING, Phase.STOPPED))
-            publish { it.copy(phase = Phase.STOPPED, reason = failure.reason, code = failure.code, action = AttachAction.RETRY) }
+            publish { it.copy(phase = Phase.STOPPED, reason = failure.reason, code = failure.code, marker = failure.marker,
+                failedOperation = failure.operation, failedKind = failure.kind, action = AttachAction.RETRY) }
     }
 
-    private suspend fun uploadImage(image: Prepared, ack: (Int) -> Unit): Failure? {
+    private suspend fun uploadItem(image: Prepared, ack: (Int) -> Unit): Failure? {
         val begun = busy<Begin>(30_000, { it.reply }) {
             val id = UUID.randomUUID().toString()
             val inFlight = synchronized(attempt.lock) {
@@ -86,7 +94,7 @@ internal class AttachSender(
                 CompletableDeferred<Unit>().also { attempt.beginInFlight = it }
             }
             try {
-                Begin(id, request { link.attachBegin(terminal, id, image.mediaType, image.bytes.size) })
+                Begin(id, uploadRequest { link.attachBegin(terminal, id, image.mediaType, image.bytes.size, image.name) })
             } finally {
                 synchronized(attempt.lock) { attempt.beginInFlight = null }
                 inFlight.complete(Unit)
@@ -101,7 +109,7 @@ internal class AttachSender(
             val end = Attach.chunkEnd(offset, image.bytes.size, offer)
             val chunk = image.bytes.copyOfRange(offset, end)
             val reply = busy<JSONObject>(25_000, { it }) {
-                if (uploading()) request { link.attachChunk(terminal, id, offset, chunk) } else offline()
+                if (uploading()) uploadRequest { link.attachChunk(terminal, id, offset, chunk) } else offline()
             } ?: return Failure("busy")
             if (!uploading()) return Failure("offline")
             if (!Attach.received(reply, end)) return failure(reply)
@@ -110,9 +118,9 @@ internal class AttachSender(
         }
 
         if (!uploading()) return Failure("offline")
-        val finish = request { link.attachFinish(terminal, id) }
+        val finish = uploadRequest { link.attachFinish(terminal, id) }
         if (!uploading()) return Failure("offline")
-        if (!Attach.admitted(finish, id, image.bytes.size, offer)) return failure(finish)
+        if (!Attach.admitted(finish, id, image, offer)) return failure(finish)
         attempt.admitted += id
         return null
     }
@@ -127,7 +135,7 @@ internal class AttachSender(
         if (fresh && !canWrite) {
             cleanup()
             if (attempt.phase.compareAndSet(Phase.SENDING, Phase.STOPPED)) publish {
-                it.copy(phase = Phase.STOPPED, reason = "offline", action = AttachAction.RETRY,
+                it.copy(phase = Phase.STOPPED, reason = "offline", failedOperation = "send", action = AttachAction.RETRY,
                     uploads = emptyList(), sendWritten = false)
             }
             return
@@ -138,6 +146,7 @@ internal class AttachSender(
         if (attempt.phase.compareAndSet(Phase.SENDING, outcome.phase)) {
             publish { current ->
                 current.copy(phase = outcome.phase, reason = outcome.reason, code = outcome.code,
+                    marker = outcome.marker, failedOperation = outcome.operation, failedKind = outcome.kind,
                     uncertain = outcome.uncertain, action = outcome.action,
                     images = if (outcome.phase == Phase.MAYBE || outcome.action != AttachAction.NONE) current.images else emptyList(),
                     uploads = if (outcome.uncertain || outcome.action == AttachAction.RETRY) current.uploads else emptyList())
@@ -166,6 +175,10 @@ internal class AttachSender(
         }
     }
 
+    private suspend fun uploadRequest(call: suspend () -> JSONObject): JSONObject = request(call).also {
+        if (Attach.filesUnsupported(it)) withdrawDocuments()
+    }
+
     private suspend fun <T> busy(limit: Long, reply: (T) -> JSONObject, call: suspend () -> T): T? =
         withTimeoutOrNull(limit) {
             var pause = 250L
@@ -179,7 +192,10 @@ internal class AttachSender(
         }
 
     private data class Begin(val id: String, val reply: JSONObject)
-    private data class Failure(val reason: String, val code: String = "")
+    private data class Failure(
+        val reason: String, val code: String = "", val marker: String = "",
+        val operation: String = "", val kind: AttachmentKind? = null
+    )
 
     companion object {
         private val retryable = setOf("busy", "rate", "unavailable")
@@ -198,18 +214,23 @@ internal class AttachSender(
 
         private fun failure(reply: JSONObject): Failure = when {
             reply.opt("ok") == false && reply.opt("state") == "refused" ->
-                Failure(reply.optString("reason", "failed"), reply.optString("code", ""))
+                Failure(reply.optString("reason", "failed"), reply.optString("code", ""), marker(reply))
             reply.opt("ok") == false && reply.opt("state") == "unknown" -> Failure("offline")
             else -> Failure("failed")
         }
 
+        private fun marker(reply: JSONObject) = if (reply.opt("message") == "sign-in-code") "sign-in-code" else ""
+
         internal data class Outcome(
             val phase: Phase, val action: AttachAction = AttachAction.NONE, val uncertain: Boolean = false,
-            val reason: String = "", val code: String = ""
+            val reason: String = "", val code: String = "", val marker: String = "",
+            val operation: String = "", val kind: AttachmentKind? = null
         )
 
         internal fun outcome(m: ImageMessage, a: JSONObject): Outcome {
-            val maybe = Outcome(Phase.MAYBE, AttachAction.RETRY, uncertain = true)
+            val kind = if (m.fileCount > 0 && a.opt("code") != "MODEL_DOES_NOT_SUPPORT_IMAGES")
+                AttachmentKind.DOCUMENT else AttachmentKind.IMAGE
+            val maybe = Outcome(Phase.MAYBE, AttachAction.RETRY, uncertain = true, operation = "send", kind = kind)
             if (a.has("id") && a.opt("id") != m.id) return maybe
             val state = a.opt("state")
             if (a.opt("id") == m.id) {
@@ -221,7 +242,7 @@ internal class AttachSender(
             val code = a.optString("code")
             if (m.uncertain) return maybe.copy(
                 action = if (reason in retryable || reason == "offline") AttachAction.RETRY else AttachAction.SEND_AGAIN,
-                reason = reason.ifBlank { "failed" }, code = code
+                reason = reason.ifBlank { "failed" }, code = code, marker = marker(a)
             )
             if (reason == "offline") return maybe
             val action = when {
@@ -230,7 +251,7 @@ internal class AttachSender(
                     AttachAction.SEND_AGAIN
                 else -> AttachAction.NONE
             }
-            return Outcome(Phase.REFUSED, action, reason = reason, code = code)
+            return Outcome(Phase.REFUSED, action, reason = reason, code = code, marker = marker(a), operation = "send", kind = kind)
         }
     }
 }

@@ -20,12 +20,17 @@ import java.io.OutputStream
 import java.util.Base64
 import java.util.UUID
 
+internal enum class AttachmentKind { IMAGE, DOCUMENT }
+
 internal data class Prepared(
     val key: String, val uri: String, val mediaType: String, val bytes: ByteArray, val width: Int, val height: Int,
-    val preview: Bitmap? = null
+    val preview: Bitmap? = null, val kind: AttachmentKind = AttachmentKind.IMAGE, val name: String? = null
 ) {
     val heldBytes get() = bytes.size.toLong() + (preview?.byteCount ?: 0)
-    fun fits(offer: Attach.Offer) = Attach.fits(offer, mediaType, bytes.size, width, height)
+    fun fits(offer: Attach.Offer) = when (kind) {
+        AttachmentKind.IMAGE -> Attach.fits(offer, mediaType, bytes.size, width, height)
+        AttachmentKind.DOCUMENT -> offer.documents?.fits(mediaType, bytes.size) == true
+    }
 }
 
 internal class AttachImage(

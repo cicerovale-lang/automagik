@@ -1,8 +1,10 @@
 package ai.namastex.automagik
 
+import android.content.ActivityNotFoundException
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts.PickMultipleVisualMedia
 import androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia
 import androidx.compose.foundation.BorderStroke
@@ -19,37 +21,99 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.roundToInt
 
-/** Both launchers stay registered while the chat reconnects after returning from the picker. */
+/** All four launchers stay registered while the chat reconnects after a picker returns. */
 @Composable
-internal fun rememberAttachPicker(session: AttachSession): (Int) -> Unit {
-    val result: (List<Uri>) -> Unit = { deliverAttachPick(session, it) }
-    val one = rememberLauncherForActivityResult(remember { PickVisualMedia() }) { result(listOfNotNull(it)) }
-    val many = rememberLauncherForActivityResult(remember { PickMultipleVisualMedia(4) }, result)
-    return { slots ->
-        val request = PickVisualMediaRequest(PickVisualMedia.ImageOnly)
-        if (slots == 1) one.launch(request) else many.launch(request)
+internal fun rememberAttachPicker(session: AttachSession): (Pick) -> Unit {
+    val photo = rememberAttachLauncher(session, AttachmentKind.IMAGE, remember { PickVisualMedia() }) { listOfNotNull(it) }
+    val photos = rememberAttachLauncher(session, AttachmentKind.IMAGE, remember { PickMultipleVisualMedia(4) }) { it }
+    val file = rememberAttachLauncher(session, AttachmentKind.DOCUMENT, remember { OpenAttachDocument() }) { listOfNotNull(it) }
+    val files = rememberAttachLauncher(session, AttachmentKind.DOCUMENT, remember { OpenAttachDocuments() }) { it }
+    return { pick ->
+        when (pick.kind) {
+            AttachmentKind.IMAGE -> (if (pick.slots == 1) photo else photos)(pick, PickVisualMediaRequest(PickVisualMedia.ImageOnly))
+            AttachmentKind.DOCUMENT -> (if (pick.slots == 1) file else files)(pick, arrayOf("*/*"))
+        }
     }
 }
 
-internal fun deliverAttachPick(session: AttachSession, uris: List<Uri>) {
-    if (AppLock.locked()) session.pickDiscarded() else session.picked(uris)
+private class AttachLauncher {
+    var launchedToken: String? = null
 }
 
 @Composable
-internal fun AttachButton(s: Chat.State, att: AttachState, picker: (Int) -> Unit, session: AttachSession) {
+private fun <I, O> rememberAttachLauncher(
+    session: AttachSession, kind: AttachmentKind, contract: ActivityResultContract<I, O>, uris: (O) -> List<Uri>
+): (Pick, I) -> Unit {
+    val launch = remember { AttachLauncher() }
+    val launcher = rememberLauncherForActivityResult(contract) { result ->
+        val token = launch.launchedToken
+        launch.launchedToken = null
+        deliverAttachPick(session, kind, token, uris(result))
+    }
+    return { pick, input ->
+        // An outstanding result belongs to its original pick even if the chat has since changed.
+        if (launch.launchedToken != null) session.pickDiscarded(kind, pick.token, true)
+        else {
+            launch.launchedToken = pick.token
+            try {
+                launcher.launch(input)
+            } catch (_: ActivityNotFoundException) {
+                launch.launchedToken = null
+                session.pickDiscarded(kind, pick.token, true)
+            } catch (_: SecurityException) {
+                launch.launchedToken = null
+                session.pickDiscarded(kind, pick.token, true)
+            }
+        }
+    }
+}
+
+internal fun deliverAttachPick(session: AttachSession, uris: List<Uri>) =
+    deliverAttachPick(session, AttachmentKind.IMAGE, session.state.value.pendingPick?.token, uris)
+
+internal fun deliverAttachPick(session: AttachSession, kind: AttachmentKind, token: String?, uris: List<Uri>) {
+    if (AppLock.locked()) session.pickDiscarded(kind, token, uris.isNotEmpty()) else session.picked(kind, token, uris)
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun AttachButton(s: Chat.State, att: AttachState, picker: (Pick) -> Unit, session: AttachSession) {
     if (!s.dsh || !ChatActions.canSend(s)) return
-    IconButton(onClick = { session.pick()?.let(picker) }, modifier = Modifier.size(48.dp)) {
-        Icon(Icons.Outlined.Add, "Add images", tint = if (att.peer is Attach.Peer.Offered) Accent else Muted)
+    val documents = (att.peer as? Attach.Peer.Offered)?.offer?.documents != null && session.live(att.watchGen)
+    var sheet by remember(att.watchGen, documents) { mutableStateOf(false) }
+    IconButton(onClick = {
+        if (documents) sheet = true else session.pick(AttachmentKind.IMAGE)?.let(picker)
+    }, modifier = Modifier.size(48.dp)) {
+        Icon(Icons.Outlined.Add, if (documents) "Add images or files" else "Add images",
+            tint = if (att.peer is Attach.Peer.Offered) Accent else Muted)
+    }
+    if (sheet) {
+        ModalBottomSheet(onDismissRequest = { sheet = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = Raised, contentColor = Ink) {
+            Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp)) {
+                for ((label, kind) in listOf("Photos" to AttachmentKind.IMAGE, "Files" to AttachmentKind.DOCUMENT)) {
+                    TextButton(onClick = {
+                        sheet = false
+                        session.pick(kind)?.let(picker)
+                    }, modifier = Modifier.fillMaxWidth()) {
+                        Text(label, color = Ink)
+                    }
+                }
+            }
+        }
     }
 }
 
 @Composable
 internal fun AttachTray(att: AttachState, session: AttachSession) {
     if (att.draft.isEmpty() && att.preparing == 0) return
+    val files = att.draft.filter { it.kind == AttachmentKind.DOCUMENT }
     Column(Modifier.padding(horizontal = 12.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
             for (image in att.draft) key(image.key) {
@@ -59,9 +123,18 @@ internal fun AttachTray(att: AttachState, session: AttachSession) {
                         image.preview?.let {
                             Image(remember(it) { it.asImageBitmap() }, "Selected image", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                         }
+                        val remove = if (image.kind == AttachmentKind.DOCUMENT) {
+                            Column(Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally) {
+                                val style = LocalTextStyle.current.copy(textDirection = TextDirection.Content)
+                                Text(AttachDocument.trayLabel(image.name), color = Ink, fontSize = 12.sp, lineHeight = 13.sp, style = style)
+                                Text(fileSize(image.bytes.size.toLong()), color = Muted, fontSize = 11.sp, lineHeight = 13.sp, style = style)
+                            }
+                            "Remove file ${files.indexOf(image) + 1} of ${files.size}"
+                        } else "Remove image"
                         IconButton(onClick = { session.removeDraft(image.key) }, modifier = Modifier.align(Alignment.TopEnd).size(48.dp)) {
                             Surface(color = Raised, shape = RoundedCornerShape(12.dp)) {
-                                Icon(Icons.Outlined.Close, "Remove image", Modifier.size(16.dp), tint = Ink)
+                                Icon(Icons.Outlined.Close, remove, Modifier.size(16.dp), tint = Ink)
                             }
                         }
                     }
@@ -71,7 +144,9 @@ internal fun AttachTray(att: AttachState, session: AttachSession) {
         }
         if (att.draft.isNotEmpty()) {
             val slots = (att.peer as? Attach.Peer.Offered)?.offer?.files ?: 4
-            Text("${att.draft.size} of $slots · ${fileSize(att.draft.sumOf { it.bytes.size.toLong() })}", color = Muted, fontSize = 12.sp)
+            val count = if (files.isEmpty()) "${att.draft.size} of $slots"
+                else attachmentCount(att.draft.size - files.size, files.size)
+            Text("$count · ${fileSize(att.draft.sumOf { it.bytes.size.toLong() })}", color = Muted, fontSize = 12.sp)
         }
     }
 }
@@ -88,7 +163,7 @@ internal fun UploadMessageView(
             border = BorderStroke(1.dp, Accent.copy(alpha = .3f)), modifier = Modifier.widthIn(max = 560.dp)) {
             Column(Modifier.padding(10.dp, 8.dp)) {
                 if (m.caption.isNotBlank()) Text(ChatText.clean(m.caption), fontSize = 14.sp, lineHeight = 20.sp, color = Ink)
-                Text(if (m.count == 1) "1 image" else "${m.count} images", fontSize = 12.sp, color = Muted)
+                Text(attachmentCount(m.imageCount, m.fileCount), fontSize = 12.sp, color = Muted)
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (m.phase == Phase.UPLOADING) AttachSpinner()
                     Text(uploadLine(m, session), fontSize = 11.sp,
@@ -116,7 +191,10 @@ internal fun UploadMessageView(
     }
     if (confirm) AlertDialog(onDismissRequest = { confirm = false },
         title = { Text("Send as a new message?") },
-        text = { Text("The first one may already have reached the Bot. This sends the pictures again as another message.") },
+        text = {
+            val items = if (m.fileCount == 0) "pictures" else "attachments"
+            Text("The first one may already have reached the Bot. This sends the $items again as another message.")
+        },
         confirmButton = { TextButton(onClick = {
             confirm = false
             session.retry(m.id, confirmed = true, restoreCaption = restoreCaption)
@@ -124,20 +202,25 @@ internal fun UploadMessageView(
         dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } })
 }
 
-private fun uploadLine(m: ImageMessage, session: AttachSession) = when (m.phase) {
+internal fun attachmentCount(images: Int, files: Int): String = listOfNotNull(
+    if (images == 0) null else if (images == 1) "1 image" else "$images images",
+    if (files == 0) null else if (files == 1) "1 file" else "$files files"
+).joinToString(", ")
+
+internal fun uploadLine(m: ImageMessage, session: AttachSession) = when (m.phase) {
     Phase.UPLOADING -> "Uploading ${minOf(m.done + 1, m.count)} of ${m.count} · ${(m.progress * 100).roundToInt()}%"
     Phase.SENDING -> "Sending…"
     Phase.SENT -> "Sent"
     Phase.QUEUED -> "Queued: the agent reads it after this turn"
     Phase.CANCELLED -> "Cancelled: not sent"
     Phase.STOPPED -> if (session.stoppedAfterMove(m)) "Not sent: this Bot's chat changed on the computer."
-        else "Not sent: the upload stopped (${Attach.words(m.reason, m.code)})."
+        else "Not sent: the upload stopped (${Attach.words(m)})."
     Phase.MAYBE -> if (m.reason.isBlank()) "Maybe not sent"
-        else "Maybe not sent. The retry was refused: ${Attach.words(m.reason, m.code)}."
+        else "Maybe not sent. The retry was refused: ${Attach.words(m)}."
     Phase.REFUSED -> when {
         m.reason == "changed" -> "Not sent: this Retry didn't match the first message, which may already have reached the Bot."
-        m.action == AttachAction.RETRY -> "Not sent (${Attach.words(m.reason, m.code)})"
-        else -> "Not sent: ${Attach.words(m.reason, m.code)}"
+        m.action == AttachAction.RETRY -> "Not sent (${Attach.words(m)})"
+        else -> "Not sent: ${Attach.words(m)}"
     }
 }
 

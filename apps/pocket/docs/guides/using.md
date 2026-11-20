@@ -138,13 +138,24 @@ What the numbers mean:
 - **Bot chats** (Settings → Machines, on a connected computer) lists the Automagik Bots' chats and
   says what the phone can do there: **Writable** when the bridge advertises phone writes (send,
   answer approvals and questions, interrupt), **Read only** with the reason when it does not.
-- **Images** (Automagik Bots' chats that take phone writes): tap **+** (**Add images**) to pick up to 4 pictures, add a
-  caption or not, and send. The bubble shows the upload's progress, with **Cancel** until it is sent. **Retry** sends
-  the same message again and never twice. When the phone can't tell whether the first one arrived it
-  says *Maybe not sent*; **Send as new** then sends the pictures as another message, after asking. **Send again** sends
-  a message that could not be used (the images expired on the computer, or the Bot started a new chat) as a new one.
-  **Remove** drops an unsent picture message from the phone. Without images on that computer, **+** says what to
-  update: Pocket Link or the Automagik app. Images in a chat show their size; tap **Show** to load a small copy.
+- **Attachments** (Automagik Bots' chats that take phone writes). Tap **+** and choose **Photos** or **Files**
+  when the computer offers files. **Files** opens Android's document picker for TXT and PDF. On an images-only
+  connection, **+** opens the photo picker directly. You can mix photos and documents, up to 4 attachments
+  per message, and add an optional caption. Images and files share a limit of 128 attachments and 256 MiB
+  per phone over a rolling 24 hours.
+- Track upload progress in the message bubble. **Cancel** stops the upload before the send starts.
+  A message that may have arrived shows **Maybe not sent**. **Retry** reuses the original message so
+  the computer can avoid duplicate delivery. If the original cannot be retried, **Send as new** asks
+  before sending a separate message. **Remove** drops the unsent message from the phone. Cancel and
+  Remove leave any bytes already published on the computer.
+- Images in a chat show their size. Tap **Show** to load a small copy. A file row shows the computer's
+  reduced name and the original byte size. The row provides no preview or download and doesn't tell
+  you whether the Bot read the file. Pocket keeps picked document bytes and names in memory only.
+  The Android picker gives temporary access, and Pocket sends the original bytes, type, length, display
+  base name if available, optional caption and opaque ids to your computer. The reduced name appears in
+  DSH's file alias, Session history, the model provider's prompt handle, the chat rows and any ACP read-only
+  workspace copy. Whole-Session sharing on the desktop is optional and off by default. Attachment names,
+  picker URIs and file contents stay out of diagnostics. [Privacy policy](../privacy.md)
 - Chat text is plain text: HTML shows as the characters it is, nothing loads by itself, and a link
   opens only when you tap it and confirm. Rows stay in memory and are dropped when you leave the chat.
 

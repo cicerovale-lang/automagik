@@ -1201,34 +1201,40 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
      * it at a fake bridge to drive the chat wiring without a device (#754). The app never sets it.
      */
     private val defaultChatOpener: suspend (String, CoroutineScope, (String) -> Unit) -> ChatLink =
-        { hostId, scope, lost -> connectChatLink(hostId, scope, emptyList(), false, lost) }
+        { hostId, scope, lost -> connectChatLink(hostId, scope, emptyList(), lost = lost) }
     internal var chatOpener: suspend (hostId: String, scope: CoroutineScope, lost: (String) -> Unit) -> ChatLink = defaultChatOpener
     internal var chatOpenerManage: (suspend (String, CoroutineScope, List<String>, (String) -> Unit) -> ChatLink)? = null
     internal var chatOpenerAttach: (suspend (String, CoroutineScope, List<String>, Boolean, (String) -> Unit) -> ChatLink)? = null
-    internal val attachments = AttachImage(getApplication<Application>().contentResolver).let { images ->
+    internal val attachments = getApplication<Application>().contentResolver.let { resolver ->
+        val images = AttachImage(resolver)
+        val documents = AttachDocument(resolver)
         AttachSession(viewModelScope, chat = { _chat.value }, ref = { chatRef }, demo = { state.value.demo },
             link = { chatLink }, notice = { n -> chatUpdate(chatGen) { it.copy(notice = n) } },
-            prepare = { uri, offer -> images.prepare(uri, offer) })
+            prepare = { uri, offer -> images.prepare(uri, offer) },
+            prepareDocument = { uri, offer, stillAllowed -> documents.prepare(uri, offer, stillAllowed) })
     }
     /** Automatic reconnects of the open DSH chat since its last snapshot (main thread only); see [Chat.RESUMABLE]. */
     private var resumeAttempt = 0
     private var resumeJob: Job? = null
 
     private suspend fun openChatLink(hostId: String, scope: CoroutineScope, manage: List<String> = emptyList(),
-                                     attachments: Boolean = false, lost: (String) -> Unit): ChatLink =
+                                     attachments: Boolean = false, documents: Boolean = false, lost: (String) -> Unit): ChatLink =
         chatOpenerAttach?.invoke(hostId, scope, manage, attachments, lost)
             ?: chatOpenerManage?.invoke(hostId, scope, manage, lost)
             ?: if ((manage.isEmpty() && !attachments) || chatOpener !== defaultChatOpener) chatOpener(hostId, scope, lost)
-            else connectChatLink(hostId, scope, manage, attachments, lost)
+            else connectChatLink(hostId, scope, manage, attachments, documents, lost)
 
     /** The production chat route: Iroh to the paired desktop, then Pocket Link's chat version 1 ([ChatClient]). */
-    private suspend fun connectChatLink(hostId: String, scope: CoroutineScope, manage: List<String>, attachments: Boolean, lost: (String) -> Unit): ChatLink {
+    private suspend fun connectChatLink(
+        hostId: String, scope: CoroutineScope, manage: List<String>, attachments: Boolean = false,
+        documents: Boolean = false, lost: (String) -> Unit
+    ): ChatLink {
         val profile = state.value.hosts.find { it.id == hostId && it.paired } ?: error("This machine isn’t paired with Pocket Link.")
         val t = try { IrohLink.open(getApplication(), profile.ticket, profile.session, scope, IrohLink.CHAT) }
             catch (e: Exception) { if (e !is CancellationException && ChatClient.refusedRoute(e)) throw ChatUnsupported() else throw e }
         val core = CoreClient(t.input, t.output, t, scope, lost)
         // The transport scope owns the hello read so a timeout can close it while it is still blocked on input.
-        val hello = scope.async(Dispatchers.IO) { ChatClient.start(core, manage, attachments) }
+        val hello = scope.async(Dispatchers.IO) { ChatClient.start(core, manage, attachments, documents) }
         try { return withTimeout(20_000) { PocketLinkChat(hello.await()) } }
         catch (e: Exception) { core.close(); hello.cancel(); throw e }
     }
@@ -1269,7 +1275,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
             val scope = CoroutineScope(coroutineContext + SupervisorJob(coroutineContext[Job]))
             var link: ChatLink? = null
             try {
-                link = openChatLink(ref.hostId, scope, attachments = true) { reason ->
+                link = openChatLink(ref.hostId, scope, attachments = true, documents = true) { reason ->
                     attachments.linkClosed(gen)
                     chatUpdate(gen) { it.copy(connected = false, error = "Chat disconnected: $reason",
                         messages = it.messages.map { m -> if (m.state == "sending") m.copy(state = "maybe") else m }) }

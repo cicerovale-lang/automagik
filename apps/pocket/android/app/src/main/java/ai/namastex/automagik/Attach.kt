@@ -3,6 +3,7 @@ package ai.namastex.automagik
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Base64
+import java.util.Locale
 import kotlin.math.sqrt
 
 /** The negotiated Pocket Link attachment contract. No Android state or image processing. */
@@ -23,6 +24,10 @@ object Attach {
     const val JPEG = "image/jpeg"
     const val WEBP = "image/webp"
     const val GIF = "image/gif"
+    const val TXT = "text/plain"
+    const val PDF = "application/pdf"
+    internal val documentTypes = setOf(TXT, PDF)
+    internal const val FILES_UNSUPPORTED = "ATTACHMENT_FILES_UNSUPPORTED"
     private const val SAFE_INTEGER = 9_007_199_254_740_991L
     private val uploadTypes = setOf(PNG, JPEG, WEBP)
     internal val readTypes = uploadTypes + GIF
@@ -39,8 +44,16 @@ object Attach {
 
     data class Offer(
         val mediaTypes: Set<String>, val fileBytes: Int, val files: Int, val messageBytes: Int,
-        val maxPixels: Long, val maxDimension: Long, val chunkBytes: Int, val thumbnail: Thumbnail
+        val maxPixels: Long, val maxDimension: Long, val chunkBytes: Int, val thumbnail: Thumbnail,
+        val documents: DocumentOffer? = null
     )
+    data class DocumentOffer(val mediaTypes: Set<String>, val fileBytes: Int) {
+        internal fun fits(type: String, bytes: Int) = type in mediaTypes && bytes in 1..fileBytes
+    }
+
+    internal fun withoutDocuments(peer: Peer): Peer = if (peer is Peer.Offered && peer.offer.documents != null)
+        Peer.Offered(peer.offer.copy(documents = null)) else peer
+
     data class Thumbnail(val edge: Int, val bytes: Int)
 
     internal fun int(j: JSONObject, key: String): Long? = nonNegativeInt(j, key)?.takeIf { it > 0 }
@@ -53,7 +66,7 @@ object Attach {
 
     private fun JSONArray.values() = (0 until length()).map { opt(it) }
 
-    fun peer(hello: JSONObject): Peer {
+    fun peer(hello: JSONObject, documents: Boolean = false): Peer {
         if (!hello.has("attachments")) return Peer.Missing
         val a = hello.optJSONObject("attachments") ?: return Peer.Unusable
         if (int(a, "version") != 1L) return Peer.Unusable
@@ -78,20 +91,42 @@ object Attach {
         val edge = int(t, "edge")?.takeIf { it in 1..512 } ?: return Peer.Unusable
         val bytes = int(t, "bytes")?.takeIf { it in 1..131_072 } ?: return Peer.Unusable
         return Peer.Offered(Offer(types.filterIsInstance<String>().toSet(), file.toInt(), files.toInt(), total.toInt(),
-            pixels, dimension, CHUNK_BYTES, Thumbnail(edge.toInt(), bytes.toInt())))
+            pixels, dimension, CHUNK_BYTES, Thumbnail(edge.toInt(), bytes.toInt()),
+            if (documents) documentOffer(a.optJSONObject("documents")) else null))
+    }
+
+    private fun documentOffer(value: JSONObject?): DocumentOffer? {
+        if (value == null) return null
+        val types = value.optJSONArray("mediaTypes")?.values()?.filterIsInstance<String>()
+            ?.filter { it in documentTypes }?.toSet()?.takeIf { it.isNotEmpty() } ?: return null
+        val limits = value.optJSONObject("limits") ?: return null
+        val cap = int(limits, "fileBytes") ?: return null
+        return DocumentOffer(types, minOf(cap, 8_388_608L).toInt())
+    }
+
+    fun documentType(mime: String?, displayBase: String?, offer: DocumentOffer): String? {
+        val type = when (mime?.substringBefore(';')?.trim()?.lowercase(Locale.ROOT)) {
+            PDF -> PDF
+            TXT -> TXT
+            null, "", "application/octet-stream" -> AttachDocument.suffixType(displayBase)
+            else -> null
+        }
+        return type?.takeIf { it in offer.mediaTypes }
     }
 
     fun usable(peer: Peer, dshWrite: Boolean, terminal: String, subscribed: Boolean) =
         peer is Peer.Offered && dshWrite && Chat.isDsh(terminal) && subscribed
 
-    internal fun refusedLocal(): JSONObject =
-        JSONObject().put("ok", false).put("state", "refused").put("reason", "read-only")
+    internal fun refusedLocal(reason: String = "read-only"): JSONObject =
+        JSONObject().put("ok", false).put("state", "refused").put("reason", reason)
 
     internal fun uploadParams(terminal: String, upload: String): JSONObject =
         JSONObject().put("terminal", terminal).put("upload", upload)
 
-    internal fun beginParams(terminal: String, upload: String, mediaType: String, bytes: Int): JSONObject =
-        uploadParams(terminal, upload).put("mediaType", mediaType).put("bytes", bytes)
+    internal fun beginParams(terminal: String, upload: String, mediaType: String, bytes: Int, name: String? = null): JSONObject =
+        uploadParams(terminal, upload).put("mediaType", mediaType).put("bytes", bytes).apply {
+            if (name != null) put("name", name)
+        }
 
     internal fun chunkParams(terminal: String, upload: String, offset: Int, data: ByteArray): JSONObject =
         uploadParams(terminal, upload).put("offset", offset).put("data", Base64.getEncoder().encodeToString(data))
@@ -104,17 +139,28 @@ object Attach {
             if (text.isNotBlank()) put("text", text)
         }
 
+    internal fun filesUnsupported(reply: JSONObject) = reply.opt("ok") == false &&
+        reply.opt("state") == "refused" && reply.opt("reason") == "unsupported" && reply.opt("code") == FILES_UNSUPPORTED
+
     internal fun opened(a: JSONObject, upload: String) = a.opt("ok") == true && a.opt("state") == "open" &&
         a.opt("upload") == upload && int(a, "chunkBytes") == CHUNK_BYTES.toLong()
 
     internal fun received(a: JSONObject, end: Int) = a.opt("ok") == true && int(a, "received") == end.toLong()
 
-    internal fun admitted(a: JSONObject, upload: String, length: Int, offer: Offer): Boolean {
+    internal fun admitted(a: JSONObject, upload: String, item: Prepared, offer: Offer): Boolean {
+        if (a.opt("ok") != true || a.opt("state") != "admitted" || a.opt("upload") != upload ||
+            a.has("image") == a.has("file")) return false
+        val length = item.bytes.size.toLong()
+        if (item.kind == AttachmentKind.DOCUMENT) {
+            val file = a.optJSONObject("file") ?: return false
+            val name = file.opt("name") as? String ?: return false
+            return file.opt("mediaType") == item.mediaType && int(file, "bytes") == length &&
+                AttachDocument.admittedName(name, item.mediaType)
+        }
         val image = a.optJSONObject("image") ?: return false
         if (int(image, "width") == null || int(image, "height") == null) return false
         val type = image.opt("mediaType") as? String ?: return false
-        return a.opt("ok") == true && a.opt("state") == "admitted" && a.opt("upload") == upload &&
-            type in offer.mediaTypes && int(image, "bytes") == length.toLong() && int(image, "stored") != null
+        return type in offer.mediaTypes && int(image, "bytes") == length && int(image, "stored") != null
     }
 
     internal fun fits(offer: Offer, type: String, bytes: Int, w: Int, h: Int) =
@@ -169,6 +215,16 @@ object Attach {
         Peer.None -> "Images aren't available on this connection. Update Pocket Link and the Automagik app on this computer, then reconnect."
         Peer.Unusable -> "Images aren't available: update Pocket and Pocket Link on this computer."
         is Peer.Offered -> "Wait for the chat to connect."
+    }
+
+    internal fun words(message: ImageMessage): String {
+        if (message.reason == "invalid" && message.marker == "sign-in-code") {
+            if (message.failedOperation == "send") return "the message looks like a sign-in code; edit it"
+            if (message.failedOperation == "attach" && message.failedKind == AttachmentKind.DOCUMENT)
+                return "the file name looks like a sign-in code; rename the file"
+        }
+        return if (message.failedKind == AttachmentKind.DOCUMENT)
+            AttachDocument.words(message.reason, message.code) else words(message.reason, message.code)
     }
 
     internal fun words(reason: String, code: String = ""): String = when (reason) {

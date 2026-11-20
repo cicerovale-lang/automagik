@@ -36,6 +36,9 @@ internal interface ChatLink : Closeable {
     suspend fun settingsModel(terminal: String, rev: String, model: String) = ChatClient.refusedSettings()
     val attach: Attach.Peer get() = Attach.Peer.NotAsked
     suspend fun attachBegin(terminal: String, upload: String, mediaType: String, bytes: Int) = Attach.refusedLocal()
+    suspend fun attachBegin(terminal: String, upload: String, mediaType: String, bytes: Int, name: String?) =
+        if (mediaType in Attach.documentTypes || name != null) Attach.refusedLocal("unsupported")
+        else attachBegin(terminal, upload, mediaType, bytes)
     suspend fun attachChunk(terminal: String, upload: String, offset: Int, data: ByteArray) = Attach.refusedLocal()
     suspend fun attachFinish(terminal: String, upload: String) = Attach.refusedLocal()
     suspend fun attachCancel(terminal: String, upload: String) = Attach.refusedLocal()
@@ -71,6 +74,8 @@ internal class PocketLinkChat(private val client: ChatClient) : ChatLink {
     override val attach get() = client.attach
     override suspend fun attachBegin(terminal: String, upload: String, mediaType: String, bytes: Int) =
         client.attachBegin(terminal, upload, mediaType, bytes)
+    override suspend fun attachBegin(terminal: String, upload: String, mediaType: String, bytes: Int, name: String?) =
+        client.attachBegin(terminal, upload, mediaType, bytes, name)
     override suspend fun attachChunk(terminal: String, upload: String, offset: Int, data: ByteArray) =
         client.attachChunk(terminal, upload, offset, data)
     override suspend fun attachFinish(terminal: String, upload: String) = client.attachFinish(terminal, upload)
@@ -90,13 +95,20 @@ internal class PocketLinkChat(private val client: ChatClient) : ChatLink {
  */
 class ChatClient(
     private val core: CoreClient, val dshWrite: Boolean = false, val manage: Set<String> = emptySet(),
-    val attach: Attach.Peer = Attach.Peer.NotAsked
+    attach: Attach.Peer = Attach.Peer.NotAsked
 ) : Closeable {
     internal val isClosed get() = core.isClosed
-    private val watched = ConcurrentHashMap<Int, String>()
+    @Volatile var attach: Attach.Peer = attach
+        private set
+
+    private class Subscription(val terminal: String) {
+        @Volatile var gone = false
+    }
+    private val watched = ConcurrentHashMap<Int, Subscription>()
     @Volatile internal var finishTimeoutMs: Long = Attach.FINISH_TIMEOUT_MS
 
     companion object {
+        private val uploadMethods = setOf(Attach.METHOD_BEGIN, Attach.METHOD_CHUNK, Attach.METHOD_FINISH)
         val MEMORY = listOf("memory.read", "memory.edit", "memory.add")
         val SCHEDULES = listOf("schedule.list", "schedule.pause", "schedule.resume", "schedule.rename")
         val SETTINGS = listOf("settings.read", "settings.name", "settings.model")
@@ -110,9 +122,11 @@ class ChatClient(
         internal fun refusedSettings() = refusedMemory()
 
         /** Pocket requires each opted-in family to grant its read method so it can check an unconfirmed write. */
-        suspend fun start(core: CoreClient, manage: List<String> = emptyList(), attachments: Boolean = false): ChatClient {
+        suspend fun start(
+            core: CoreClient, manage: List<String> = emptyList(), attachments: Boolean = false, documents: Boolean = false
+        ): ChatClient {
             val requested = (MEMORY + SCHEDULES + SETTINGS).filter { it in manage }
-            val hello = core.start(requested.takeIf { it.isNotEmpty() }?.let { JSONArray(it) }, attachments)
+            val hello = core.start(requested.takeIf { it.isNotEmpty() }?.let { JSONArray(it) }, attachments, documents)
             if (hello.optInt("chat") != 1) { core.close(); throw ChatUnsupported() }
             val answered = hello.optJSONArray("manage")?.let { a -> (0 until a.length()).map { a.opt(it) } }.orEmpty()
             val granted = if (answered.all { it is String }) requested.filter { it in answered }.toSet() else emptySet()
@@ -124,7 +138,7 @@ class ChatClient(
                 }
             }.toSet()
             return ChatClient(core, dshWrite = hello.opt("dshWrite") == true, manage = usable,
-                attach = if (attachments) Attach.peer(hello) else Attach.Peer.NotAsked)
+                attach = if (attachments) Attach.peer(hello, documents) else Attach.Peer.NotAsked)
         }
 
         /** A connect that failed because the bridge does not offer the chat route (an older Pocket Link). */
@@ -151,7 +165,8 @@ class ChatClient(
     suspend fun subscribe(terminal: String, after: String?, event: (JSONObject) -> Unit, closed: (String) -> Unit): Int {
         val p = params(terminal).apply { if (after != null) put("after", after) }
         val channel = core.call("chat.subscribe", p).getInt("channel")
-        watched[channel] = terminal
+        val subscription = Subscription(terminal)
+        watched[channel] = subscription
         val partial = StringBuilder()
         core.stream(channel, { bytes ->
             partial.append(String(bytes, Charsets.UTF_8))
@@ -160,9 +175,12 @@ class ChatClient(
                 if (end < 0) break
                 val line = partial.substring(0, end)
                 partial.delete(0, end + 1)
-                if (line.isNotBlank()) runCatching { JSONObject(line) }.getOrNull()?.let(event)
+                if (line.isNotBlank()) runCatching { JSONObject(line) }.getOrNull()?.let {
+                    if (it.opt("type") == "gone") subscription.gone = true
+                    event(it)
+                }
             }
-        }) { reason -> watched.remove(channel); closed(reason) }
+        }) { reason -> watched.remove(channel, subscription); closed(reason) }
         return channel
     }
 
@@ -219,12 +237,33 @@ class ChatClient(
         settings("settings.model", terminal) { put("rev", rev).put("model", model) }
 
     private suspend fun attachment(
-        method: String, terminal: String, timeoutMs: Long = core.callTimeoutMs, params: () -> JSONObject
-    ): JSONObject = if (Attach.usable(attach, dshWrite, terminal, terminal in watched.values))
-        core.call(method, params(), timeoutMs) else Attach.refusedLocal()
+        method: String, terminal: String, timeoutMs: Long = core.callTimeoutMs, document: Boolean = false,
+        params: () -> JSONObject
+    ): JSONObject {
+        val live = watched.values.firstOrNull { it.terminal == terminal && !it.gone }
+        val subscription = live ?: if (document) null else watched.values.firstOrNull { it.terminal == terminal }
+        if (!Attach.usable(attach, dshWrite, terminal, subscription != null))
+            return Attach.refusedLocal(if (document) "unsupported" else "read-only")
+        val reply = core.call(method, params(), timeoutMs)
+        if (method in uploadMethods && Attach.filesUnsupported(reply) &&
+            subscription != null && !subscription.gone && subscription in watched.values) {
+            attach = Attach.withoutDocuments(attach)
+        }
+        return reply
+    }
 
-    suspend fun attachBegin(terminal: String, upload: String, mediaType: String, bytes: Int) =
-        attachment(Attach.METHOD_BEGIN, terminal) { Attach.beginParams(terminal, upload, mediaType, bytes) }
+    suspend fun attachBegin(terminal: String, upload: String, mediaType: String, bytes: Int, name: String? = null): JSONObject {
+        val document = mediaType in Attach.documentTypes
+        if (name != null && !document) return Attach.refusedLocal("invalid")
+        if (document) {
+            val grant = (attach as? Attach.Peer.Offered)?.offer?.documents
+            if (grant == null || mediaType !in grant.mediaTypes) return Attach.refusedLocal("unsupported")
+            if (!grant.fits(mediaType, bytes)) return Attach.refusedLocal("too-large")
+        }
+        return attachment(Attach.METHOD_BEGIN, terminal, document = document) {
+            Attach.beginParams(terminal, upload, mediaType, bytes, name)
+        }
+    }
     suspend fun attachChunk(terminal: String, upload: String, offset: Int, data: ByteArray) =
         attachment(Attach.METHOD_CHUNK, terminal) { Attach.chunkParams(terminal, upload, offset, data) }
     suspend fun attachFinish(terminal: String, upload: String) =
