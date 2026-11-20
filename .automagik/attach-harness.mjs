@@ -145,21 +145,30 @@ function route(engine, Connection = ChatConnection, Writer = chatWriter, port = 
     }),
       isClosed: () => conn.closed, isRevoked: () => false, onFail: () => conn.close('write failed') })
     conn = new Connection({ engine, device: PHONE, write: writer, end: () => socket.destroy() })
-    let ingressPending = ''
+    // Count decoded phone requests (post-hello traffic is framed), before any local bridge refusal.
+    const request = typeof conn.request === 'function' ? conn.request.bind(conn) : null
+    if (request) conn.request = m => {
+      if (m?.method === 'chat.attach') {
+        const type = m.params?.mediaType
+        ingress[type === 'text/plain' || type === 'application/pdf' ? 'document' :
+          typeof type === 'string' && type.startsWith('image/') ? 'image' : 'other']++
+      }
+      if (m?.method === 'chat.attachmentRead') ingress.attachmentRead++
+      return request(m)
+    }
+    let helloPending = ''
     socket.on('data', bytes => {
-      ingressPending += bytes.toString('utf8')
-      for (let end; (end = ingressPending.indexOf('\n')) >= 0;) {
-        const line = ingressPending.slice(0, end); ingressPending = ingressPending.slice(end + 1)
-        let request
-        try { request = JSON.parse(line) } catch { continue }
-        if (request.method === 'hello') process.stderr.write(
-          `phone-request port=${port} attachments=${request.params?.attachments === 1} documents=${request.params?.documents === 1}\n`)
-        if (request.method === 'chat.attach') {
-          const type = request.params?.mediaType
-          ingress[type === 'text/plain' || type === 'application/pdf' ? 'document' :
-            typeof type === 'string' && type.startsWith('image/') ? 'image' : 'other']++
+      if (helloPending !== null) {
+        helloPending += bytes.toString('latin1')
+        const end = helloPending.indexOf('\n')
+        if (end >= 0) {
+          try {
+            const hello = JSON.parse(helloPending.slice(0, end))
+            if (hello.method === 'hello') process.stderr.write(
+              `phone-request port=${port} attachments=${hello.params?.attachments === 1} documents=${hello.params?.documents === 1}\n`)
+          } catch {}
+          helloPending = null
         }
-        if (request.method === 'chat.attachmentRead') ingress.attachmentRead++
       }
       conn.feed(bytes)
     })

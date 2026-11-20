@@ -75,13 +75,13 @@ class FixtureDocumentProvider : ContentProvider() {
         return MatrixCursor(columns).apply {
             addRow(columns.map { column -> when (column) {
                 OpenableColumns.DISPLAY_NAME -> uri.getQueryParameter("name")
-                OpenableColumns.SIZE -> File(requireNotNull(context).filesDir, requireNotNull(uri.lastPathSegment)).length()
+                OpenableColumns.SIZE -> File(requireNotNull(context).applicationContext.filesDir, requireNotNull(uri.lastPathSegment)).length()
                 else -> null
             } }.toTypedArray())
         }
     }
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor =
-        ParcelFileDescriptor.open(File(requireNotNull(context).filesDir, requireNotNull(uri.lastPathSegment)), ParcelFileDescriptor.MODE_READ_ONLY)
+        ParcelFileDescriptor.open(File(requireNotNull(context).applicationContext.filesDir, requireNotNull(uri.lastPathSegment)), ParcelFileDescriptor.MODE_READ_ONLY)
     override fun insert(uri: Uri, values: ContentValues?): Uri? = null
     override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int = 0
     override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?): Int = 0
@@ -181,7 +181,7 @@ class AttachDocumentDeviceTest {
     }
     private fun fixture(name: String, mime: String, bytes: ByteArray): Uri {
         val id = UUID.randomUUID().toString()
-        val file = File(testContext.filesDir, id)
+        val file = File(app.filesDir, id)
         file.writeBytes(bytes)
         created += file
         return Uri.parse("content://ai.namastex.automagik.test.documents/$id").buildUpon()
