@@ -1,0 +1,27 @@
+// Disposable CI mirror, matching the successful issue 244 verification.
+def mirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+gradle.beforeSettings { settings ->
+    settings.pluginManagement.repositories.maven { url = mirror }
+    settings.dependencyResolutionManagement.repositories.maven { url = mirror }
+}
+
+gradle.afterProject { project, state ->
+    if (project.path == ':app' && state.failure == null) {
+        ['androidx.test:runner:1.6.2', 'androidx.test:core:1.6.1',
+         'androidx.test.ext:junit:1.2.1', 'junit:junit:4.13.2'].each {
+            project.dependencies.add('androidTestImplementation', it)
+        }
+        project.dependencies.add('androidTestImplementation', project.dependencies.platform('androidx.compose:compose-bom:2025.04.01'))
+        project.dependencies.add('androidTestImplementation', 'androidx.compose.ui:ui-test-junit4')
+    }
+}
+
+allprojects {
+    tasks.withType(Test).configureEach {
+        systemProperty 'robolectric.dependency.repo.url', mirror
+        testLogging {
+            events 'started', 'passed', 'failed', 'skipped'
+            exceptionFormat 'full'
+        }
+    }
+}
