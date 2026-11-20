@@ -88,46 +88,17 @@ const INTERPRETERS = new Set(["node", "bun", "bunx", "deno", "python", "python3"
 const base = (p) => String(p ?? "").split("/").pop().replace(/^-/, "");
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
-// Options with a separate operand that can precede another executable in a wrapper chain.
-const WRAPPER_OPERANDS = {
-  nice: ["-n", "--adjustment"], time: ["-f", "--format", "-o", "--output"], watch: ["-n", "--interval"],
-  node: ["-r", "--require", "--import", "--loader", "--experimental-loader"],
-  bun: ["-r", "--preload", "--cwd", "--env-file"], bunx: ["-p", "--package"],
-  npx: ["-p", "--package"], pnpm: ["-C", "--dir"], yarn: ["--cwd"],
-  uv: ["--directory", "--project", "--with", "--python", "--env-file"],
-  uvx: ["--from", "--with", "--python"], ruby: ["-I", "-r"], nodemon: ["--exec", "-x"],
-};
-
-/** Whether a configured executable prefix can replace or discard a selected vendor variable. */
-export function runChangesAgentHome(words, variable) {
+/** A selected home may pass only through env assignments and the vendor executable. */
+export function plainAgentRun(words, agent) {
   let i = 0;
-  while (INTERPRETERS.has(base(words[i]))) {
-    const wrapper = base(words[i++]);
-    // sudo can reset the environment according to the host's policy.
-    if (wrapper === "sudo") return true;
-    let options = true;
-    while (i < words.length) {
-      const word = words[i];
-      if (ASSIGNMENT.test(word)) {
-        if (word.startsWith(`${variable}=`)) return true;
-      } else if (options && word === "--") {
-        options = false;
-      } else if (options && word.startsWith("-")) {
-        if (wrapper === "env") {
-          if (word === "-u" || word === "--unset") {
-            const name = words[++i];
-            if (!name || name === variable) return true;
-          } else if (word.startsWith("--unset=") || /^-u[^-]/.test(word)) {
-            if (word.slice(word.startsWith("--") ? 8 : 2) === variable) return true;
-          } else if (["-C", "--chdir", "-a", "--argv0"].includes(word)) {
-            if (!words[++i]) return true;
-          } else if (!/^(?:--(?:chdir|argv0)=.+|-[Ca].+)$/u.test(word)) return true;
-        } else if (WRAPPER_OPERANDS[wrapper]?.includes(word)) i += 1;
-      } else break;
+  if (words[i] === "env" || words[i] === "/usr/bin/env") {
+    i += 1;
+    while (i < words.length && ASSIGNMENT.test(words[i])) {
+      if (/^(CLAUDE_CONFIG_DIR|CODEX_HOME)=/.test(words[i])) return false;
       i += 1;
     }
   }
-  return false;
+  return i < words.length && words[i].split("/").pop() === AGENTS[agent]?.run?.[0];
 }
 
 // The index of the agent's own executable in `words`: past any interpreter and its flags. env's

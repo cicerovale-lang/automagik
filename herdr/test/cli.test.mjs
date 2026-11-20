@@ -3954,52 +3954,33 @@ test("#1208 restart and revive reject --agent-home on every entry path", (t) => 
   assert.equal(s.calls().length, 0);
 });
 
-test("#1208 tree relaunches a recorded worker home and leaves a legacy helper on Accounts", (t) => {
-  const s = restartScene(t);
-  const picked = join(s.root, "private-home"), legacy = join(s.home, ".claude-legacy");
-  const workerDir = join(s.root, "worker-dir"), legacyDir = join(s.root, "legacy-dir");
-  mkdirSync(picked, { mode: 0o700 });
-  mkdirSync(legacy, { mode: 0o755 });
-  mkdirSync(workerDir); mkdirSync(legacyDir);
-  writeFileSync(join(s.app, "claude-logins.json"), JSON.stringify({ use: "legacy", logins: [{ id: "legacy", dir: legacy }] }));
+test("#1208 tree refuses a marked or unreadable descendant before starting or ending panes", (t) => {
+  for (const argv of [["/usr/bin/env", "PATH=/bin", "CODEX_HOME=/private", "AUTOMAGIK_AGENT_HOME=1", "codex"], undefined]) {
+    const { s, wt1 } = treeScene(t);
+    const st = s.hcState();
+    st.terminals.push({ ...term("t30", { cwd: wt1, parent: "t7" }), name: "deep-worker", die_with_parent: true, argv });
+    writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+    const r = s.cli(["restart", "Genie", "--tree", "--force"]);
+    assert.equal(r.code, 1, r.err);
+    assert.match(r.err, /deep-worker runs on its own login home; end it first or restart without --tree/);
+    assert.equal(s.calls().some((call) => ["run", "kill"].includes(call[0])), false);
+    assert.ok(s.hcState().terminals.every((pane) => pane.state === "live"));
+  }
+});
+
+test("#1208 tree uses launch argv and leaves a marked descendant of a surviving helper alone", (t) => {
+  const { s, wt1 } = treeScene(t);
   const st = s.hcState();
-  st.terminals.push({ ...term("t8", { parent: "t5", cwd: workerDir }), name: "recorded-home-worker",
-    die_with_parent: true, argv: ["claude"], labels: { "worker.of": ID.main } });
-  st.terminals.push({ ...term("t9", { parent: "t5", cwd: legacyDir }), name: "legacy-worker",
-    die_with_parent: true, argv: ["claude"], labels: { "worker.of": ID.main } });
+  const worker = st.terminals.find((pane) => pane.address === "t7");
+  const rows = ledgerOf(s).map((row) => ({ ...row, created_ms: worker.created_ms, agentHome: "/obsolete" }));
+  writeFileSync(ledgerPath(s.app), rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+  st.terminals.push({ ...term("t30", { cwd: wt1, parent: "t9" }), die_with_parent: true,
+    argv: ["/usr/bin/env", "AUTOMAGIK_AGENT_HOME=1", "CLAUDE_CONFIG_DIR=/private", "claude"] });
   writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
-  mkdirSync(dirname(ledgerPath(s.app)), { recursive: true });
-  const row = (terminal, worktree, fields) => ({ event: "start", kind: "worker", terminal,
-    botId: ID.main, project: s.project, worktree, agent: "claude", ...fields });
-  const rows = [row("t8", workerDir, { agentHome: picked }), row("t9", legacyDir, {})];
-  writeFileSync(ledgerPath(s.app), rows.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
-  const linked = s.cli(["restart", "Genie", "--tree", "--force", "--linked-tree"]);
-  assert.equal(linked.code, 1, linked.err);
-  assert.match(linked.err, /recorded-home-worker.*linked --tree/);
-  assert.equal(s.calls().some((call) => ["run", "kill"].includes(call[0])), false);
-  chmodSync(picked, 0o755);
-  const mode = s.cli(["restart", "Genie", "--tree", "--force"]);
-  assert.equal(mode.code, 1, mode.err);
-  assert.match(mode.err, /recorded-home-worker.*0700/);
-  assert.equal(s.calls().some((call) => ["run", "kill"].includes(call[0])), false);
-  const moved = join(s.root, "other-private-home");
-  mkdirSync(moved, { mode: 0o700 });
-  rmSync(picked, { recursive: true });
-  symlinkSync(moved, picked);
-  const changed = s.cli(["restart", "Genie", "--tree", "--force"]);
-  assert.equal(changed.code, 1, changed.err);
-  assert.match(changed.err, /recorded-home-worker.*realpath changed/);
-  assert.equal(s.calls().some((call) => ["run", "kill"].includes(call[0])), false);
-  rmSync(picked);
-  mkdirSync(picked, { mode: 0o700 });
-  const r = s.cli(["restart", "Genie", "--tree", "--json"]);
+  const r = s.cli(["restart", "Genie", "--tree", "--force", "--json"]);
   assert.equal(r.code, 0, r.err);
-  const [parent, worker, oldWorker] = runs(s).map(agentParts);
-  assert.ok(parent.env.includes(`CLAUDE_CONFIG_DIR=${legacy}`));
-  assert.ok(worker.env.includes(`CLAUDE_CONFIG_DIR=${picked}`));
-  assert.deepEqual(oldWorker.env.slice(1), [`CLAUDE_CONFIG_DIR=${legacy}`]);
-  assert.deepEqual(ledgerOf(s).filter((x) => x.event === "start" && ["t101", "t102"].includes(x.terminal))
-    .map((x) => x.agentHome), [picked, null]);
+  assert.deepEqual(agentWords(runs(s)[1]), ["omp", "--model=kimi/k3", "--thinking=high", "--continue"]);
+  assert.equal(s.hcState().terminals.find((pane) => pane.address === "t30").state, "live");
 });
 
 test("restart --tree #453: a Claude helper's by-hand line under a bad record carries login A's words and says why (review Low 2)", (t) => {

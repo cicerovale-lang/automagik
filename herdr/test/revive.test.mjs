@@ -382,6 +382,19 @@ test("revive: after a reboot each bot at a bare shell is restarted in its place,
   assert.equal(runsOf(s).length, 2);
 });
 
+test("#1208 revive leaves the old tree running when a descendant has a selected home", (t) => {
+  const s = world(t, { terminals: (p) => [
+    pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } }),
+    pane("t8", { cwd: p, parent: "t5", labels: { "worker.of": ID.main } }),
+    pane("t9", { cwd: p, parent: "t8", argv: ["/usr/bin/env", "CODEX_HOME=/private", "AUTOMAGIK_AGENT_HOME=1", "codex"] }),
+  ] });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.json().projects[0].results[0].why, /t9 runs on its own login home; end it first or restart without --tree/);
+  assert.equal(s.calls().some((call) => ["run", "kill"].includes(call[0])), false);
+  assert.ok(s.hcState().terminals.every((p) => p.state === "live"));
+});
+
 test("#1413: revive after a reboot starts a Claude bot with its own permission mode", (t) => {
   const s = world(t, {
     file: team({ main: { permissionMode: "bypassPermissions" } }),
@@ -1051,6 +1064,29 @@ test("kimiCandidates: the index replayed in order, a deleted id dropped, other f
 test("pickSession takes Kimi's session_<uuid> ids as it takes UUIDs, and no other shape", () => {
   assert.equal(pickSession({ createdMs: 1_000_000, candidates: [{ id: KID, born: 1_001_000 }] }), KID);
   for (const id of ["session_nope", "session-" + SID, `x${KID}`, "--last"]) assert.equal(pickSession({ createdMs: 1_000_000, candidates: [{ id, born: 1_001_000 }] }), null, id);
+});
+
+for (const store of ["different", "same", "unknown"]) test(`#1208 Codex discovery skips marked workers and checks a rival's ${store} store`, (t) => {
+  const born = Date.now() - 60_000;
+  const id = v7(born + 1500);
+  const s = world(t, { terminals: (p) => [
+    pane("t8", { cwd: p, created: born, front: ["codex"], argv: ["codex"], labels: { "worker.of": ID.main } }),
+    pane("t9", { cwd: p, created: born + 500, front: ["codex"], labels: { "worker.of": ID.cap },
+      argv: ["/usr/bin/env", `CODEX_HOME=${join(p, "private")}`, "AUTOMAGIK_AGENT_HOME=1", "codex"] }),
+  ] });
+  const selected = join(s.project, "private");
+  codexRollout(s, { id, cwd: s.project });
+  if (store === "different") mkdirSync(selected, { mode: 0o700 });
+  if (store === "same") symlinkSync(join(s.home, ".codex"), selected);
+  writeFileSync(ledgerPath(s.app), [8, 9].map((n) => JSON.stringify({
+    event: "start", kind: "worker", terminal: `t${n}`, created_ms: born + (n - 8) * 500, core: CORE,
+    agent: "codex", project: s.project, worktree: s.project, agentHome: n === 9 ? selected : null,
+  })).join("\n") + "\n");
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(sessionLabels(s), store === "different" ? [["t8", id]] : []);
+  assert.deepEqual(s.ledger().filter((row) => row.event === "session").map((row) => [row.terminal, row.session]),
+    store === "different" ? [["t8", id]] : []);
 });
 
 test("#1417 revive: a Codex bot at a bare shell is resumed by the id its rollout holds, though its first turn wrote it a day after the launch; the id is never printed", (t) => {

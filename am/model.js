@@ -1054,15 +1054,21 @@ export function applyBotEdit(raw, entry, newCategory = null, { workerHomeGiven =
   if ("code" in bot && (bot.code === undefined || bot.code === null || bot.code === "")) delete merged.code;
   // Off is the default: only a bot that keeps Claude Code's person features stores the field (#1558).
   if ("personFeatures" in bot && bot.personFeatures !== true) delete merged.personFeatures;
-  const dropWorkerHome = isObject(merged.worker) && Object.hasOwn(merged.worker, "agentHome")
-    && (merged.worker.agentHome === "" || (i >= 0 && !workerHomeGiven && workerAgentOf(out.bots[i]) !== workerAgentOf(merged)));
+  if ("worker" in bot && (!isObject(bot.worker) || Object.keys(bot.worker).length === 0)) delete merged.worker;
+  const previous = out.bots[i];
+  const hadWorkerHome = isObject(previous?.worker) && Object.hasOwn(previous.worker, "agentHome");
+  const hasWorkerHome = isObject(merged.worker) && Object.hasOwn(merged.worker, "agentHome");
+  const changedWorkerAgent = previous && (hadWorkerHome || hasWorkerHome) && workerAgentOf(previous) !== workerAgentOf(merged);
+  if (!workerHomeGiven && !changedWorkerAgent && hadWorkerHome) {
+    merged.worker = { ...merged.worker, agentHome: previous.worker.agentHome };
+  }
+  const dropWorkerHome = hasWorkerHome && (workerHomeGiven ? merged.worker.agentHome === "" : changedWorkerAgent);
   if (isObject(merged.worker) && (merged.worker.agyMode === "" || dropWorkerHome)) {
     merged.worker = { ...merged.worker };
     if (merged.worker.agyMode === "") delete merged.worker.agyMode;
     if (dropWorkerHome) delete merged.worker.agentHome;
     if (!Object.keys(merged.worker).length) delete merged.worker;
   }
-  if ("worker" in bot && (!isObject(bot.worker) || Object.keys(bot.worker).length === 0)) delete merged.worker;
   if (i >= 0) out.bots[i] = merged; else out.bots.push(merged);
   return out;
 }

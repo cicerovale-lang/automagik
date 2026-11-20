@@ -304,7 +304,9 @@ test("#1208 worker home precedence reaches the fake Claude and Codex processes",
 
 test("#1208 workers refuse bad modes, malformed roster homes, templates and configured env changes before creating branches", (t) => {
   const original = team();
-  const s = scene(t, { file: original, templates: [...TEMPLATES, { name: "opaque-home", command: "unknown-wrapper" }] });
+  const s = scene(t, { file: original, templates: [...TEMPLATES,
+    { name: "opaque-home", command: "unknown-wrapper" },
+    { name: "mixed-home", command: "claude --version && ./run-codex" }] });
   const dir = privateWorkerHome(s, "worker-home");
   const refuse = (name, flags, why) => {
     const branch = `feat/${name}`;
@@ -319,25 +321,30 @@ test("#1208 workers refuse bad modes, malformed roster homes, templates and conf
   refuse("bad-mode", ["--agent-home", dir], /0700/);
   chmodSync(dir, 0o700);
   for (const name of ["dev-sol", "opaque-home"]) {
-    refuse(name, ["--agent-home", dir, "--template", name], /can't be proven through a template; use --agent/);
+    refuse(name, ["--agent-home", dir, "--template", name], /a template can't be proven to use the login home; pass --agent/i);
   }
   const rosterPath = join(s.project, ".herdr/bots.json");
   original.bots[2].worker.agentHome = dir;
   for (const name of ["dev-sol", "opaque-home"]) {
     original.bots[2].worker.template = name;
     writeFileSync(rosterPath, JSON.stringify(original));
-    refuse(`default-${name}`, [], /can't be proven through a template; use --agent/);
+    refuse(`default-${name}`, [], /a template can't be proven to use the login home; pass --agent/i);
   }
+  original.bots[2].worker.agent = "codex";
+  original.bots[2].worker.template = "mixed-home";
+  writeFileSync(rosterPath, JSON.stringify(original));
+  refuse("mixed-roster-template", [], /a template can't be proven to use the login home; pass --agent/i);
   delete original.bots[2].worker.template;
   original.bots[2].worker.agentHome = null;
   writeFileSync(rosterPath, JSON.stringify(original));
   refuse("malformed", [], /worker\.agentHome.*has no folder/);
   for (const [i, run] of [
     ["env", "CODEX_HOME=/other", "codex"], ["nice", "-n", "5", "/usr/bin/env", "-u", "CODEX_HOME", "codex"],
+    ["pnpm", "exec", "env", "-u", "CODEX_HOME", "codex"],
     ...["-i", "--ignore-environment", "-S", "--unknown"].map((word) => ["nice", "env", word, "codex"]),
   ].entries()) {
     writeFileSync(join(s.app, "programs.json"), JSON.stringify({ programs: { codex: { run } } }));
-    refuse(`env-${i}`, ["--agent-home", dir], /configured run can change or clear CODEX_HOME/);
+    refuse(`env-${i}`, ["--agent-home", dir], /configured run must start codex directly or through env/);
   }
   delete original.bots[2].worker.agentHome;
   writeFileSync(rosterPath, JSON.stringify(original));
@@ -357,7 +364,8 @@ test("#1208 a selected Codex home supplies trust, model cache and its own develo
   writeFileSync(join(dir, "models_cache.json"), JSON.stringify({ models: [{ slug: "selected-only" }] }));
   writeFileSync(join(caller, "config.toml"), `[projects.${JSON.stringify(s.project)}]\ntrust_level = "trusted"\n`);
   writeFileSync(join(dir, "config.toml"), `developer_instructions = "FROM_SELECTED_HOME"\n${untrustedToml(s.project)}`);
-  exe(join(s.root, "bin", "codex"), '#!/bin/sh\nhead -n 1 "$CODEX_HOME/config.toml"\n');
+  writeFileSync(join(s.app, "programs.json"), JSON.stringify({ programs: { codex: { run: ["env", "KEEP=1", "codex"] } } }));
+  exe(join(s.root, "bin", "codex"), '#!/bin/sh\n[ "$KEEP" = 1 ] || exit 4\nhead -n 1 "$CODEX_HOME/config.toml"\n');
   const r = s.cli(["worker", "task", "--branch", "feat/selected-codex", "--model", "selected-only", "--agent-home", dir, "--json"],
     { env: { CODEX_HOME: caller } });
   assert.equal(r.code, 0, r.err);
@@ -3827,6 +3835,21 @@ test("unproxied worker CLI stays on the guard path with switch off and forged en
   assert.ok(runs[0].some((w) => w.startsWith("PATH=") && w.includes(GUARD_DIR)), runs[0].join(" "));
   assert.equal(s.calls().filter((args) => args[0] === "server").length, 1,
     "an unproxied pane retains server.status for core id");
+});
+
+test("#1208 an unproxied worker with a selected home passes the full guard", async (t) => {
+  const s = scene(t);
+  const dir = privateWorkerHome(s, "guarded-home");
+  const r = await s.cliAsync(["worker", "do the task", "--branch", "feat/guarded-home", "--agent-home", dir, "--json"],
+    { env: { PATH: `${GUARD_DIR}:${s.env.PATH}`, HC_SOCKET: "" } });
+  assert.equal(r.code, 0, r.err);
+  const [run] = s.runs();
+  assert.equal(s.runs().length, 1);
+  const words = run.slice(run.indexOf("--") + 1);
+  assert.deepEqual(words.slice(2, 4), [`CODEX_HOME=${dir}`, "AUTOMAGIK_AGENT_HOME=1"]);
+  assert.ok(words[1].startsWith("PATH=") && words[1].includes(GUARD_DIR));
+  assert.equal(words.some((word) => word.startsWith("HERDR_APP_HOME=")), false);
+  assert.equal(s.ledger().find((row) => row.event === "start" && row.terminal === r.json().terminal).agentHome, dir);
 });
 
 async function startOneShotTransportServer(t, socketPath, result) {

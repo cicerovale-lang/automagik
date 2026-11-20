@@ -999,11 +999,11 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
   `CLAUDE_CONFIG_DIR` or `CODEX_HOME`. Without the flag, a worker on the roster's default worker
   agent uses `worker.agentHome` when set. Other workers use the usual login, including Accounts
   for Claude. A selected home must be an existing absolute directory with mode exactly `0700`.
-  A template must be set aside with `--agent` if a home would apply. The approved hc proxy and
-  configured commands that change or clear the vendor variable refuse the selection before any
-  branch or worktree is created. A local `restart --tree` reuses the worker's recorded realpath
-  and refuses before ending any pane if that path or mode has changed. A linked `--tree` restart
-  refuses when a helper has a recorded home.
+  A home selection requires a direct `claude` or `codex` command, optionally preceded by `env`
+  with assignments that leave both vendor variables alone. Templates and the approved hc proxy
+  refuse a home selection before branch or worktree creation. A worker's launch argv identifies
+  the selection and its ledger row records the realpath. If `restart --tree` would end that
+  worker, end the worker first or restart without `--tree`.
 - **Templates:** `--template T` runs the hc template `T` (`hc templates` lists them)
   instead of an agent, for seats whose command sets more than a model: a custom model
   provider, keys, flags. A template owns its command, so `--template` with `--agent`,

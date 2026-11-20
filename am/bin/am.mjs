@@ -200,6 +200,11 @@ async function main(args) {
     if (verb === "rollback") return rollback(rest);
     if (verb === "self") return self(rest);
     if (verb === undefined || verb === "help" || verb === "--help" || verb === "-h") {
+      const separator = rest.indexOf("--");
+      const options = separator < 0 ? rest : rest.slice(0, separator);
+      if (options.some((word) => word === "--agent-home" || word.startsWith("--agent-home="))) {
+        throw new Usage("--agent-home goes with worker.");
+      }
       process.stdout.write(HELP);
       await forward(["--help"]);
       return null;

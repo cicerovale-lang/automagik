@@ -32,7 +32,7 @@ import { PANE_ENV_PATH, agentOnMachine, interpreterPath, paneEnvOf } from "../ag
 import { briefingFilePath, installHook, launchBriefingText, screenTail, stableBriefingPath, withExclude } from "../briefingText.mjs";
 import { gatherBriefing } from "../briefing.mjs";
 import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust, AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, PERMISSION_MODE_DEFAULT, PERMISSION_MODE_WHAT, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexEffortProblem, codexProfileFrom, codexProfileName, codexSettingsFrom, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModel, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, knownModelsFrom, agModelsPath, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, permissionModeArgs, permissionModeFrom, permissionModeProblem, permissionModesOf, resolveAgent, resumeAfterTurn, resumesById,
-  promptByMessage, runChangesAgentHome, sessionIdArgs, shownModel, withAgySettings, withBriefing, withOverrides } from "../models.js";
+  plainAgentRun, promptByMessage, sessionIdArgs, shownModel, withAgySettings, withBriefing, withOverrides } from "../models.js";
 import { AG_MODELS_TIMEOUT_MS, agModelsSpawnResult, refreshAgModelsSync } from "../modelCache.js";
 import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, WORKTREES_EXCLUDE,
   GUARD_DIR, KILL_GUARD_DIR, KILL_GUARD_NAME, SESSION_LABEL, TRANSCRIPT_LABEL, baseCandidates, branchNamesTask, branchSlug, guardPathWith,
@@ -283,6 +283,7 @@ const modelIo = (codexHome) => ({ home: home(), appHome: appHome(), codexHome, r
 
 const agentHomeIo = { isDir: (path) => isDir(path), mode: (path) => statSync(path).mode, realpath: (path) => realDir(path) };
 const checkedAgentHome = (agent, dir) => agentHomeFor(agent, dir, agentHomeIo);
+const AGENT_HOME_MARKER = "AUTOMAGIK_AGENT_HOME";
 /** The agents Herdr can start: its shipped table with the app home's programs.json applied. */
 const agentTable = () => withOverrides(readText(`${appHome()}/programs.json`));
 
@@ -937,6 +938,10 @@ export class LedgerRefusal extends CliError {}
  * `hc get <t> --json`; null only when hc answers not_found (exit 3), any other failure throws
  * (no answer within `timeout` ms, hc's 15 s when not given, included).
  */
+function hcErrorKind(reply) {
+  try { return JSON.parse(reply.stderr || reply.stdout)?.error?.kind ?? null; } catch { return null; }
+}
+
 async function hcLookup(terminal, { timeout, strictNotFound = false } = {}) {
   const r = await hc(["get", terminal, "--json"], { timeout });
   if (r.code === 0) {
@@ -945,8 +950,7 @@ async function hcLookup(terminal, { timeout, strictNotFound = false } = {}) {
     return get;
   }
   if (r.killed) throw new CliError(`hc get ${terminal} gave no answer in ${(timeout ?? 15_000) / 1000} s`);
-  let kind = null;
-  try { kind = JSON.parse(r.stderr || r.stdout)?.error?.kind ?? null; } catch { kind = null; }
+  const kind = hcErrorKind(r);
   if (strictNotFound ? r.code === 3 && kind === "not_found" : r.code === 3 || kind === "not_found") return null;
   throw new CliError(`hc get ${terminal} failed: ${(r.stderr || r.stdout).trim()}`);
 }
@@ -1648,7 +1652,7 @@ const OPTIONS = {
   "worker-template": { type: "string" }, "worker-agent-home": { type: "string" }, template: { type: "string" }, "agent-home": { type: "string" },
   branch: { type: "string" }, worktree: { type: "string" }, base: { type: "string" }, effort: { type: "string" }, tier: { type: "string" },
   task: { type: "string" }, bot: { type: "string" }, move: { type: "boolean" },
-  queued: { type: "boolean" }, cancel: { type: "boolean" }, "run-queued": { type: "string" }, "linked-tree": { type: "boolean" },
+  queued: { type: "boolean" }, cancel: { type: "boolean" }, "run-queued": { type: "string" },
   fresh: { type: "boolean" }, force: { type: "boolean" }, save: { type: "boolean" }, tree: { type: "boolean" }, "fresh-shared": { type: "boolean" },
   cwd: { type: "string" },
   revive: { type: "boolean" }, boot: { type: "boolean" }, wait: { type: "string" }, "dry-run": { type: "boolean" }, last: { type: "boolean" },
@@ -2569,7 +2573,8 @@ function workerDefaults(opts, entry, base) {
   else if (model !== undefined) {
     if (optionLike(model)) throw new CliError(`--worker-model: "${model}" starts with a dash, so an agent would read it as an option.`, 2);
     const codexHome = resolvedAgent === "codex" && !agentHomePathProblem(w.agentHome) ? w.agentHome : undefined;
-    const list = agent ? modelList(codexHome ? resolvedAgent : agent, model, codexHome) : [];
+    const deferModel = opts.machine !== undefined && codexHome !== undefined;
+    const list = agent && !deferModel ? modelList(codexHome ? resolvedAgent : agent, model, codexHome) : [];
     if (list.length && !list.includes(model)) throw new CliError(`--worker-model: ${model} isn't a known ${agent} model. Pick one of: ${list.join(", ")}.`);
     w.model = model;
   }
@@ -3435,7 +3440,7 @@ async function relabelPane(terminal, words, prefix, warnedRelabels) {
  * (keepAppHomeOutOfGit): its rows hold session ids. The terminal runs already, so a failure only
  * comes back as a warning; null when written with nothing to say.
  */
-export function appendLedger(row, appHomeDir = appHome(), { required = false } = {}) {
+export function appendLedger(row, appHomeDir = appHome()) {
   const path = ledgerPath(appHomeDir);
   const notes = [];
   try {
@@ -3453,7 +3458,6 @@ export function appendLedger(row, appHomeDir = appHome(), { required = false } =
       writeSync(fd, ledgerLine(row));
     } finally { closeSync(fd); }
   } catch (e) {
-    if (required) throw e;
     notes.push(`${row.event === "pr" ? `${row.branch}'s pull request ${row.pr} isn't in ${LEDGER_FILE}, so usagemeter won't see it`
       : `${row.terminal} runs, but it isn't in ${LEDGER_FILE}, so its usage won't be tied to it`}: ${e?.message ?? e}`);
   }
@@ -3464,10 +3468,10 @@ export function appendLedger(row, appHomeDir = appHome(), { required = false } =
  * Appends an end row unless the ledger already ends that launch (one end row per launch key:
  * restart, --tree and the worktree sweep may each see the same terminal end). A warning, or null.
  */
-function appendEnd(row, dir = appHome()) {
+function appendEnd(row) {
   const key = launchKey(row);
-  if (key && workerLedgerRows(dir).some((r) => r?.event === "end" && launchKey(r) === key)) return null;
-  return appendLedger(row, dir);
+  if (key && workerLedgerRows().some((r) => r?.event === "end" && launchKey(r) === key)) return null;
+  return appendLedger(row);
 }
 
 /** The app homes keepAppHomeOutOfGit has looked at in this run: each is checked once. */
@@ -4246,8 +4250,7 @@ async function restartTreeOnMachine(opts, project, bot) {
   const held = linkedRestartHeld(project, bot, observed);
   const paneEnv = await paneEnvOn(machine, key);
   if (paneEnv.refused) throw new CliError(`The project's pane environment on ${machine} could not be read; fix it and retry the restart.`);
-  // A CLI that predates the guard rejects the delegated request at argument parsing.
-  const args = ["restart", bot.id, "--project", key, "--tree", "--linked-tree", "--json"];
+  const args = ["restart", bot.id, "--project", key, "--tree", "--json"];
   for (const flag of ["force", "fresh", "fresh-shared", "save"]) if (opts[flag]) args.push(`--${flag}`);
   for (const flag of ["agent", "model"]) if (opts[flag] !== undefined) args.push(`--${flag}`, opts[flag]);
   const script = `
@@ -4268,7 +4271,8 @@ if [ -n "$restart_terminal" ]; then
   "$restart_cli" attach "$restart_bot" "$restart_terminal" --project "$restart_project" --json >/dev/null || exit $?
 fi
 exec "$restart_cli" "$@"`;
-  await recheckLinkedRestart(project, bot, observed, opts, true);
+  const current = await recheckLinkedRestart(project, bot, observed, opts, true);
+  if (current) await checkTreeHomes(current.get.address);
   const result = await remoteIo.exec("sh", ["-c", script, "sh", paneEnv.appHome ?? "", paneEnv.prepend ?? "",
     held?.binding.terminal ?? "", bot.id, key, ...args], machine, { cwd: key, timeout: 540 });
   let out;
@@ -4975,8 +4979,8 @@ async function exitedBefore(terminal, rest) {
 }
 
 /** The workers ledger's rows ([] when it can't be read). */
-function workerLedgerRows(dir = appHome()) {
-  try { return readLedger(readText(ledgerPath(dir)) ?? ""); } catch { return []; }
+function workerLedgerRows() {
+  try { return readLedger(readText(ledgerPath(appHome())) ?? ""); } catch { return []; }
 }
 
 /** The workers ledger's last seat row for `botId` in project `key`, as the pane it stood for: { address, created_ms, cwd, labels }, or null. */
@@ -5089,9 +5093,9 @@ async function livePanes() {
  * `ledger`: the workers ledger's rows (the other launches there, and the ids already tied to one). Null when there
  * is none, or it can't be told from another pane's. The id is held: never printed.
  */
-function discoveredSession(agentKey, get, ledger, panes, codexHome) {
+function discoveredSession(agentKey, get, ledger, panes) {
   // `panes` (livePanes): null when hc couldn't list them, and then nothing is picked.
-  if (!discoversSession(agentKey) || !Number.isSafeInteger(get?.created_ms) || !Array.isArray(panes)) return null;
+  if (markedAgentHome(get) || !discoversSession(agentKey) || !Number.isSafeInteger(get?.created_ms) || !Array.isArray(panes)) return null;
   const cwd = get.cwd ?? get.foreground?.cwd ?? null;
   if (typeof cwd !== "string" || !cwd.startsWith("/")) return null;
   const folders = [...new Set([cwd, realDir(cwd)].filter(Boolean))];
@@ -5111,7 +5115,7 @@ function discoveredSession(agentKey, get, ledger, panes, codexHome) {
       }
     } else if (agentKey === "antigravity") candidates = agyCandidates(readText(agyHistoryPath(home())) ?? "", folders);
     else if (agentKey === "codex") {
-      const dir = codexSessionsDir(codexHome ?? codexHomeOf(home(), process.env));
+      const dir = codexSessionsDir(codexHomeOf(home(), process.env));
       const days = codexFolders(dir);
       if (days === null) return null;
       const launch = new Date(get.created_ms);
@@ -5152,13 +5156,22 @@ function discoveredSession(agentKey, get, ledger, panes, codexHome) {
       }
     }
   } catch { return null; }
-  const { rivals, claimed } = ledgerRivals(ledger, { terminal: get.address, createdMs: get.created_ms, agentKey, folders });
+  const otherStore = new Map();
+  if (agentKey === "codex") {
+    const store = realDir(codexHomeOf(home(), process.env));
+    for (const p of panes) {
+      if (otherCodexHome(p, store)) otherStore.set(p.address, p.created_ms);
+    }
+  }
+  const rows = otherStore.size ? ledger.filter((r) => !Number.isSafeInteger(r?.created_ms)
+    || otherStore.get(r.terminal) !== r.created_ms) : ledger;
+  const { rivals, claimed } = ledgerRivals(rows, { terminal: get.address, createdMs: get.created_ms, agentKey, folders });
   // Every other live pane on that agent in the folder is a rival too, whoever started it (as
   // sharersOf counts them): by the program in front, or its launch command (a bare shell hc kept).
   const agents = agentTable();
   const inFolder = (d) => typeof d === "string" && d !== "" && (folders.includes(d) || folders.includes(realDir(d) ?? d));
   for (const p of panes) {
-    if (p.address === get.address || !(inFolder(p.cwd) || inFolder(p.foreground?.cwd))) continue;
+    if (p.address === get.address || otherStore.has(p.address) || !(inFolder(p.cwd) || inFolder(p.foreground?.cwd))) continue;
     if (agentKeyOfArgv(unwrapKeep(p.foreground?.argv), agents) !== agentKey && agentKeyOfArgv(paneCommand(p)?.argv, agents) !== agentKey) continue;
     rivals.push({ terminal: p.address, created_ms: Number.isSafeInteger(p.created_ms) ? p.created_ms : null });
     for (const k of [SESSION_LABEL, "revive.session"]) if (typeof p.labels?.[k] === "string" && p.labels[k]) claimed.add(p.labels[k]);
@@ -5177,32 +5190,24 @@ function discoveredSession(agentKey, get, ledger, panes, codexHome) {
 async function recordSessions() {
   let recorded = 0;
   sessionDiscovery.clear();
+  if (!sessionsOnDisk()) return recorded;
   try {
     const agents = agentTable();
     const ledger = workerLedgerRows();
-    if (!sessionsOnDisk() && !ledger.some((r) => r.agent === "codex" && typeof r.agentHome === "string"
-      && existsSync(codexSessionsDir(r.agentHome)))) return recorded;
     const gets = await livePanes();
     for (const get of gets ?? []) {
-      if (!get.labels?.[BOT_LABEL] && !get.labels?.[WORKER_OF_LABEL]) continue;
-      const markedHome = get.labels?.[WORKER_OF_LABEL] && paneLaunchEnv(get)?.has("CODEX_HOME") ? launchHomeOf(get) : null;
-      const rows = markedHome && markedHome !== appHome() ? workerLedgerRows(markedHome) : ledger;
-      const start = rows.findLast((r) => r?.event === "start" && r.terminal === get.address && r.created_ms === get.created_ms) ?? null;
+      if (markedAgentHome(get) || (!get.labels?.[BOT_LABEL] && !get.labels?.[WORKER_OF_LABEL])) continue;
+      const start = ledger.findLast((r) => r?.event === "start" && r.terminal === get.address && r.created_ms === get.created_ms) ?? null;
       // Its agent: the program in front, else its start row's, else its launch command's (a bare shell hc kept).
       const agentKey = agentKeyOfArgv(unwrapKeep(get.foreground?.argv), agents) ?? start?.agent ?? agentKeyOfArgv(paneCommand(get)?.argv, agents) ?? null;
       if (!discoversSession(agentKey)) continue;
-      if (get.labels?.[SESSION_LABEL] || get.labels?.["revive.session"] || ledgerSession(rows, get.address, agentKey, get.created_ms)) continue;
-      const codexHome = agentKey === "codex" && start?.kind === "worker" ? start.agentHome : null;
-      if (codexHome != null) {
-        const checked = checkedAgentHome(agentKey, codexHome);
-        if (checked.dir !== codexHome || (start.core && start.core !== await rowCore())) continue;
-      }
-      const found = discoveredSession(agentKey, { ...get, cwd: start?.worktree ?? get.cwd }, rows, gets, codexHome);
+      if (get.labels?.[SESSION_LABEL] || get.labels?.["revive.session"] || ledgerSession(ledger, get.address, agentKey, get.created_ms)) continue;
+      const found = discoveredSession(agentKey, { ...get, cwd: start?.worktree ?? get.cwd }, ledger, gets);
       if (!found) continue;
       const unlogged = appendLedger(sessionRow({ terminal: get.address, session: found, transcript: null, agent: agentKey,
-        core: await rowCore(), createdMs: get.created_ms }), markedHome ?? appHome());
+        core: await rowCore(), createdMs: get.created_ms }));
       if (unlogged) continue;
-      rows.push({ event: "session", terminal: get.address, session: found, agent: agentKey, created_ms: get.created_ms });
+      ledger.push({ event: "session", terminal: get.address, session: found, agent: agentKey, created_ms: get.created_ms });
       if ((await hc(["label", get.address, `${SESSION_LABEL}=${found}`])).code === 0) recorded += 1;
     }
   } catch { /* hc or a file can't be read now: the next run looks again */ }
@@ -5223,8 +5228,9 @@ async function sharersOf({ view, cwd, botId, file, agentKey, ledger = [], old, a
   const real = realDir(cwd) ?? cwd;
   const here = (dir) => anywhere || (typeof dir === "string" && dir !== "" && (dir === cwd || (realDir(dir) ?? dir) === real));
   const agents = agentTable();
+  const store = agentKey === "codex" ? realDir(codexHomeOf(home(), process.env)) : null;
   // The agent in front, past the keep wrapper (launchArgs.js unwrapKeep) a pane may run it in.
-  const runs = (get) => agentInForeground(get) && ((agentKey === "claude" && isClaude(null, get))
+  const runs = (get) => !otherCodexHome(get, store) && agentInForeground(get) && ((agentKey === "claude" && isClaude(null, get))
     || agentKeyOfArgv(unwrapKeep(get.foreground?.argv), agents) === agentKey);
   const nameOf = (id) => (id ? file.bots.find((b) => b.id === id)?.name ?? `bot ${id}` : null);
   const out = new Map();
@@ -5284,41 +5290,53 @@ export const PRINTED = Symbol.for("automagik-herdr.printed");
  * checked or run again; otherwise it is left out.
  */
 async function helpersOf(address, { strict = false } = {}) {
-  const rows = rowsOf(await hcJson(["ls"])).filter((r) => r?.parent === address && r.state !== "finished" && r.address);
-  const states = await Promise.all(rows.map((r) => hcState(r.address)));
-  const unread = states.filter((x) => x.state === "unknown").map((x) => x.why);
+  const reply = await hcJson(["ls"]);
+  if (strict && !Array.isArray(reply) && !Array.isArray(reply?.terminals)) {
+    throw new CliError(`hc ls gave no pane list: --tree can't check ${address}'s helpers. Nothing was started.`);
+  }
+  const rows = rowsOf(reply).filter((r) => r?.parent === address && r.state !== "finished" && r.address);
+  const states = await Promise.all(rows.map((r) => hcState(r.address, { strictNotFound: strict })));
+  const unread = states.flatMap((x, i) => {
+    if (x.state === "unknown") return [{ why: x.why, pane: rows[i] }];
+    if (x.state === "live" && (x.get?.address !== rows[i].address || x.get.state !== "live")) {
+      return [{ why: `hc get ${rows[i].address} gave incomplete pane identity`, pane: rows[i] }];
+    }
+    return [];
+  });
   if (strict && unread.length) {
-    throw new CliError(`${unread.join("; ")}: --tree can't check ${address}'s ${unread.length === 1 ? "helper" : "helpers"}. Nothing was started.`);
+    throw new CliError(`${unread.map((x) => x.why).join("; ")}: --tree can't check ${address}'s ${unread.length === 1 ? "helper" : "helpers"}. Nothing was started.`);
   }
   return states.filter((x) => x.get).map((x) => x.get);
+}
+
+const ownHomeRefusal = (pane) => `${pane.name ?? pane.address} runs on its own login home; end it first or restart without --tree`;
+
+/** Check each dying child in the parent chain; the restart only rebuilds the first level. */
+async function checkTreeHomes(parent, helpers) {
+  const seen = new Set([parent]);
+  const pending = doomedHelpers(helpers ?? await helpersOf(parent, { strict: true })).map((pane) => ({ pane, parent }));
+  const nested = [];
+  for (const child of pending) {
+    const { pane } = child;
+    if (seen.has(pane.address)) continue;
+    seen.add(pane.address);
+    // helpersOf (strict) already refused a pane hc could not read. A pane hc lists with no launch argv
+    // was not started by `am worker` (its launches always carry one), so it carries no marker; an
+    // argv that is there but malformed can't be checked, and is refused.
+    const malformed = pane.argv !== undefined && pane.argv !== null
+      && (!Array.isArray(pane.argv) || !pane.argv.every((word) => typeof word === "string"));
+    if (malformed || markedAgentHome(pane)) throw new CliError(ownHomeRefusal(pane));
+    if (child.parent !== parent) nested.push(`${pane.address} (under ${child.parent})`);
+    const children = doomedHelpers(await helpersOf(pane.address, { strict: true }));
+    for (const next of children) pending.push({ pane: next, parent: pane.address });
+  }
+  return nested;
 }
 
 /** The workers ledger's last worker start row for `terminal`, or null. */
 function workerRowOf(rows, terminal) {
   for (let i = rows.length - 1; i >= 0; i -= 1) if (rows[i]?.event === "start" && rows[i].kind === "worker" && rows[i].terminal === terminal) return rows[i];
   return null;
-}
-
-function workerHomeRow(rows, pane, core) {
-  const row = rows.findLast((r) => r?.event === "start" && r.kind === "worker" && r.terminal === pane.address
-    && (r.created_ms == null || r.created_ms === pane.created_ms) && (r.core == null || r.core === core));
-  return row?.agentHome != null ? row : null;
-}
-
-function helperHome(agent, dir, who) {
-  const checked = checkedAgentHome(agent, dir);
-  if (checked.error || checked.dir !== dir) {
-    throw new CliError(`${who}'s recorded agent home can't be reused: ${checked.error ?? "its realpath changed"}.`);
-  }
-  return checked;
-}
-
-async function recordWorkerStart(row, dir = appHome()) {
-  try { return appendLedger(row, dir, { required: row.agentHome != null }); }
-  catch (e) {
-    const ended = (await hcKill(row.terminal)).code === 0;
-    throw new CliError(`${row.terminal}${ended ? " was ended" : " could not be ended"} because its selected agent home could not be recorded: ${e?.message ?? e}.`);
-  }
 }
 
 /** `dir` is a folder that is there now. */
@@ -5329,13 +5347,15 @@ const isDir = (dir) => { try { return statSync(dir).isDirectory(); } catch { ret
  * there is no such terminal, or { state: "unknown", why } when hc failed otherwise (never read
  * as gone).
  */
-async function hcState(terminal) {
+async function hcState(terminal, { strictNotFound = false } = {}) {
   const r = await hc(["get", terminal, "--json"]);
   if (r.code === 0) {
     try { const get = JSON.parse(r.stdout); return { state: get?.state === "finished" ? "finished" : "live", get }; } catch { /* below */ }
     return { state: "unknown", why: `hc get ${terminal} printed no JSON` };
   }
-  if (r.code === 3 || /not_found/.test(r.stderr ?? "")) return { state: "gone" };
+  const missing = strictNotFound ? r.code === HC_NOT_FOUND && hcErrorKind(r) === "not_found"
+    : r.code === HC_NOT_FOUND || /not_found/.test(r.stderr ?? "");
+  if (missing) return { state: "gone" };
   return { state: "unknown", why: `hc get ${terminal} failed (${(r.stderr || r.stdout).trim() || `exit ${r.code}`})` };
 }
 
@@ -5429,7 +5449,7 @@ const shellWord = (w) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(w) ? w : `'${String(w)
 function byHand(p, parent) {
   const loginWarnings = [];
   const args = helperArgs({ name: p.name, cwd: p.cwd, labels: p.labels, parent, ...helperCommand(p),
-    login: p.homeLogin ?? claudeLogin(p.argv, loginWarnings) });
+    login: claudeLogin(p.argv, loginWarnings) });
   const notes = [p.session ? `# resumes its session by id: put the id where *** stands; hc get ${p.replaced} shows it (its agent.session `
     + "or revive.session label), and so does the workers ledger"
     : "# no session id known: it resumes its folder's latest conversation"];
@@ -5484,7 +5504,7 @@ async function rerunHelpers(plans, parent, say) {
       // Keyed as its own start row or binding keyed the launch, so the sweep sees it ended.
       const unlogged = appendEnd(endRow({ kind: p.binding ? "seat" : "worker", terminal: p.replaced,
         core: p.binding?.core ?? p.worker?.core ?? await rowCore(),
-        createdMs: p.binding?.created_ms ?? p.worker?.created_ms ?? p.createdMs, reason: "replaced" }), p.workerAppHome);
+        createdMs: p.binding?.created_ms ?? p.worker?.created_ms ?? p.createdMs, reason: "replaced" }));
       if (unlogged) say(unlogged);
     }
     if (!end.ended) {
@@ -5497,11 +5517,7 @@ async function rerunHelpers(plans, parent, say) {
     const taken = new Set(rowsOf(await hcJson(["ls"])).map((r) => r?.name).filter(Boolean));
     const name = p.name && !taken.has(p.name) ? p.name : null;
     const loginWarnings = [];
-    let login;
-    try {
-      if (p.agentHome != null) helperHome(p.agent, p.agentHome, who);
-      login = p.homeLogin ?? claudeLogin(p.argv, loginWarnings);
-    } catch (e) { failed(e.message); continue; }
+    const login = claudeLogin(p.argv, loginWarnings);
     for (const w of loginWarnings) say(`${who}: ${w}`);
     let command;
     try { command = helperCommand(p, say); }
@@ -5540,13 +5556,11 @@ async function rerunHelpers(plans, parent, say) {
       // a row from before squads gets its bot's squad now.
       let squad = w.squad ?? null;
       if (!("squad" in w)) { try { squad = squadOf(loadProject(w.project).file, w.botId); } catch { squad = null; } }
-      try {
-        const unlogged = await recordWorkerStart(startRow({ kind: "worker", terminal: address, pid: await pidOf(address), botId: w.botId, task: w.task, branch: w.branch,
-          project: w.project, lead: w.lead, worktree: w.worktree, base: w.base, created: false, agent: w.agent, model: w.model, effort: w.effort,
-          template: w.template, role: w.role, swap: w.swap, override: w.override, overrideRequested: w.override_requested,
-          core, createdMs, squad, session: p.agent === "claude" ? p.session : null, agentHome: p.agentHome }), p.workerAppHome);
-        if (unlogged) say(unlogged);
-      } catch (e) { out[i].up = false; failed(e.message); continue; }
+      const unlogged = appendLedger(startRow({ kind: "worker", terminal: address, pid: await pidOf(address), botId: w.botId, task: w.task, branch: w.branch,
+        project: w.project, lead: w.lead, worktree: w.worktree, base: w.base, created: false, agent: w.agent, model: w.model, effort: w.effort,
+        template: w.template, role: w.role, swap: w.swap, override: w.override, overrideRequested: w.override_requested,
+        core, createdMs, squad, session: p.agent === "claude" ? p.session : null }));
+      if (unlogged) say(unlogged);
     }
     if (p.binding) {
       const b = p.binding;
@@ -5573,7 +5587,7 @@ async function rerunHelpers(plans, parent, say) {
     }
     // A session id carried onto the new terminal, any harness (RFC 0021 (f) 5): a session row.
     if (p.session && (p.worker || p.binding)) {
-      const unrow = appendLedger(sessionRow({ terminal: address, session: p.session, transcript: null, agent: p.agent, core, createdMs }), p.workerAppHome);
+      const unrow = appendLedger(sessionRow({ terminal: address, session: p.session, transcript: null, agent: p.agent, core, createdMs }));
       if (unrow) say(unrow);
     }
   }
@@ -5591,7 +5605,7 @@ async function rerunHelpers(plans, parent, say) {
  * or, with `freshShared`, those helpers start a new conversation; the bot itself never does
  * (restart it with --fresh). Resolves { tree: [plan + { worker, binding }], treeWarnings }.
  */
-async function treePlans({ project, bot, old, helpers, view, ledger, agents, knownSession, force, freshShared, run, revive = false, linked = false }) {
+async function treePlans({ project, bot, old, helpers, nested, view, ledger, agents, knownSession, force, freshShared, run, revive = false }) {
   const doomed = doomedHelpers(helpers);
   const me = process.env.HC_TERMINAL_ID;
   const mine = me && doomed.find((h) => [h.address, h.name].includes(me));
@@ -5601,24 +5615,7 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
     throw new CliError(`This runs in ${old.address}, the pane --tree ends before its helpers run again: run restart --tree from another terminal.`);
   }
   const treeWarnings = [];
-  const core = await rowCore();
-  const workerLedgers = new Map([[appHome(), ledger]]);
-  const homeRowOf = (h) => {
-    const dir = launchHomeOf(h) ?? appHome();
-    if (!workerLedgers.has(dir)) workerLedgers.set(dir, workerLedgerRows(dir));
-    const rows = workerLedgers.get(dir);
-    const row = workerHomeRow(rows, h, core);
-    return row ? { row, dir, rows } : null;
-  };
-  const refuseLinkedHome = (h) => {
-    if (homeRowOf(h)) throw new CliError(`${h.name ?? h.address} has a recorded agent home. A linked --tree restart can't relaunch it. Nothing was started.`);
-  };
-  if (linked) for (const h of doomed) refuseLinkedHome(h);
   // --tree restarts one level: a helper's own helpers that would end with it are refused (or, with --force, said).
-  const nested = (await Promise.all(doomed.map(async (h) => doomedHelpers(await helpersOf(h.address, { strict: true })).map((c) => {
-    if (linked) refuseLinkedHome(c);
-    return `${c.address} (under ${h.address})`;
-  })))).flat();
   if (nested.length) {
     const one = nested.length === 1;
     if (!force) {
@@ -5630,26 +5627,14 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
   // #1125: the folders each helper may write when it runs Codex again, from the folder it runs in.
   const grantsAt = new Map();
   for (const h of doomed) {
-    const cwd = helperCwd({ get: h, worker: homeRowOf(h)?.row ?? workerRowOf(ledger, h.address), realpath: realDir });
+    const cwd = helperCwd({ get: h, worker: workerRowOf(ledger, h.address), realpath: realDir });
     if (cwd && !grantsAt.has(cwd)) grantsAt.set(cwd, await localCodexGrantPlan(cwd));
   }
   const planOf = (h, fresh = null) => {
-    const selected = homeRowOf(h);
-    const worker = selected?.row ?? workerRowOf(ledger, h.address);
+    const worker = workerRowOf(ledger, h.address);
     // #939, revive only: a helper hc kept as a bare shell names its agent by its launch command.
     const agentKey = agentKeyOfArgv(h.foreground?.argv, agents) ?? worker?.agent
       ?? (revive && isBareShell(h) ? agentKeyOfArgv(paneCommand(h)?.argv, agents) : null) ?? null;
-    let checked = null;
-    if (selected) {
-      const who = h.name ?? h.address;
-      if (agentKey !== worker.agent || worker.template || h.labels?.[WORKER_TEMPLATE_LABEL] || h.template) {
-        throw new CliError(`${who}'s recorded agent home can't be reused with its current agent or template. Nothing was started.`);
-      }
-      checked = helperHome(agentKey, worker.agentHome, who);
-      if (runChangesAgentHome(agents[agentKey]?.run ?? [], agentHomeVar(agentKey))) {
-        throw new CliError(`${who}'s configured run can change or clear ${agentHomeVar(agentKey)}. Nothing was started.`);
-      }
-    }
     // A helper that is itself a bot (attached by hand): its binding moves with it.
     const binding = view.byTerminal.get(h.address)?.binding ?? null;
     const proxyIdentity = agentKey === "dsh-tui" && process.platform === "linux" ? {
@@ -5661,10 +5646,9 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
     const agyBot = [binding?.bot, worker?.botId].map((id) => project.file.bots.find((b) => b.id === id)).find(Boolean)
       ?? project.file.bots.find((b) => b.id === bot.id) ?? bot;
     for (const k of ["agent.session", "revive.session"]) holdId(h.labels?.[k]);
-    const known = knownSession(h, agentKey, selected);
-    holdId(known?.session);
+    holdId(knownSession(h, agentKey)?.session);
     const grantPlan = grantsAt.get(helperCwd({ get: h, worker, realpath: realDir })) ?? null;
-    const planned = helperPlan({ get: h, worker, session: known?.session ?? null,
+    const planned = helperPlan({ get: h, worker, session: knownSession(h, agentKey)?.session ?? null,
       agents, fresh, bot: agyBot, agy: { appHomeDir: appHome(), bot: agyBot, realpath: realDir, homeDir: home() },
       launchAgent: revive && isBareShell(h), grants: grantPlan?.dirs ?? [], where: localWhere() });
     // #1418: an attached helper's native template becomes a label when the seat is rebuilt.
@@ -5678,8 +5662,6 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
       ? localCodexWarning(worker || h.labels?.[WORKER_OF_LABEL] ? agents.codex?.run : paneCommand(h)?.argv, grantPlan) : null;
     return { ...planned, codexWithheld,
       worker, binding, proxyIdentity,
-      agentHome: checked?.dir ?? null, workerAppHome: selected?.dir,
-      homeLogin: checked ? [...checked.words, `HERDR_APP_HOME=${selected.dir}`] : null,
       createdMs: Number.isSafeInteger(h.created_ms) ? h.created_ms : null };
   };
   let tree = doomed.map((h) => planOf(h));
@@ -6548,6 +6530,17 @@ function paneLaunchEnv(get) {
   return vars;
 }
 
+const markedAgentHome = (pane) => paneLaunchEnv(pane)?.get(AGENT_HOME_MARKER) === "1";
+
+function otherCodexHome(pane, store) {
+  if (!store) return false;
+  const env = paneLaunchEnv(pane);
+  if (env?.get(AGENT_HOME_MARKER) !== "1") return false;
+  const dir = env.get("CODEX_HOME");
+  const selected = typeof dir === "string" && isAbsolute(dir) ? realDir(dir) : null;
+  return selected !== null && selected !== store && isDir(selected);
+}
+
 const sameHome = (left, right) => (realDir(left) ?? resolvePath(left)) === (realDir(right) ?? resolvePath(right));
 
 async function checkedPane(address, options) {
@@ -7180,6 +7173,7 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
   } else if (refusal) {
     throw new CliError(refusal, 1, { refused: "helpers", terminal: old.address });
   }
+  const nested = old && opts.tree ? await checkTreeHomes(old.address, helpers) : [];
   const agents = agentTable();
   const ledger = workerLedgerRows();
   const runningAgent = old ? agentKeyOfArgv(old.foreground?.argv, agents) : null;
@@ -7190,20 +7184,14 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
   // every agent that resumes by id.
   // hc's live panes, asked only when a session may have to be found on disk (#939): its rivals.
   sessionDiscovery.clear();
-  let panesNow = sessionsOnDisk() && (discoversSession(runningAgent ?? bot.agent) || helpers.length) ? await livePanes() : [];
-  if (old && opts.tree && panesNow?.length === 0 && helpers.some((h) =>
-    paneLaunchEnv(h)?.has("CODEX_HOME") || ledger.some((r) => r?.terminal === h.address && r.agent === "codex" && r.agentHome != null))) {
-    panesNow = await livePanes();
-  }
-  const knownSession = (get, agentKey, selected = null) => {
+  const panesNow = sessionsOnDisk() && (discoversSession(runningAgent ?? bot.agent) || helpers.length) ? await livePanes() : [];
+  const knownSession = (get, agentKey) => {
     const id = paneSession(get, agentKey);
     if (id) return { session: id, transcript: null };
-    const rows = selected?.rows ?? ledger;
-    const row = resumesById(agentKey) ? ledgerSession(rows, get.address, agentKey, get.created_ms) : null;
+    const row = resumesById(agentKey) ? ledgerSession(ledger, get.address, agentKey, get.created_ms) : null;
     if (row) return row;
     // #939: an agent that takes no id at launch (dsh-TUI, Antigravity, Codex, Kimi) left its session on disk.
-    const codexHome = agentKey === "codex" ? selected?.row.agentHome : undefined;
-    const found = discoveredSession(agentKey, get, rows, panesNow, codexHome);
+    const found = discoveredSession(agentKey, get, ledger, panesNow);
     return found ? { session: found, transcript: null } : null;
   };
   // #939, revive only: the bot's pane is gone whole (a reboot took it). Its last seat row stands
@@ -7281,7 +7269,7 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
     sharedNote = note;
   }
   const { tree, treeWarnings } = old && opts.tree
-    ? await treePlans({ project, bot, old, helpers, view, ledger, agents, knownSession, force: opts.force, freshShared: opts["fresh-shared"], revive: Boolean(opts.revive), linked: Boolean(opts["linked-tree"]),
+    ? await treePlans({ project, bot, old, helpers, nested, view, ledger, agents, knownSession, force: opts.force, freshShared: opts["fresh-shared"], revive: Boolean(opts.revive),
       run: { who: bot.name, agent: plan.agent, cwd, session: resumeId, mode: plan.mode } })
     : { tree: [], treeWarnings: [] };
   // --tree: the old pane and its helpers idle first (no turn ends once two panes could hold the bot's session).
@@ -7386,14 +7374,6 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
       const ended = (await hcKill(seat.terminal)).code === 0;
       throw new CliError(`${seat.terminal} didn't keep an agent in front within ${RESTART_WAIT_MS / 1000}s${ended ? ", so it was ended" : ` and couldn't be ended (hc kill ${seat.terminal})`}; `
           + `${old.address} still runs ${bot.name}, untouched.`);
-    }
-    for (const p of plans) {
-      if (p.agentHome == null) continue;
-      try { helperHome(p.agent, p.agentHome, p.name ?? p.replaced); }
-      catch (e) {
-        const ended = (await hcKill(seat.terminal)).code === 0;
-        throw new CliError(`${e.message} ${old.address} still runs ${bot.name}. Replacement ${seat.terminal}${ended ? " was ended" : " could not be ended"}.`);
-      }
     }
     // Up: the ledger moves the bot to the new terminal, under its lock.
     const created = Number.isSafeInteger(up.get?.created_ms) ? up.get.created_ms : seat.created_ms;
@@ -9310,12 +9290,11 @@ async function cmdWorker(opts, rest) {
   let templateArgv = null;
   let templateCommand = null;
   if (plan.template) {
-    if (flagHome !== undefined) throw new CliError("--agent-home can't be proven through a template; use --agent", 2);
+    if (flagHome !== undefined || hasRosterHome) {
+      throw new CliError("a template can't be proven to use the login home; pass --agent, or clear worker.agentHome with am edit <bot> --worker-agent-home=.", 2);
+    }
     const t = await templateRuns(plan.template, agents);
     runs = t.runs;
-    if (hasRosterHome && (!runs || !defaultAgent || runs === defaultAgent)) {
-      throw new CliError("--agent-home can't be proven through a template; use --agent", 2);
-    }
     templateCommand = t.command?.trim() ? t.command : null;
     // #1125: a worker template owns its command (the owner's exception, bypass included): never
     // rewritten or refused here; one that runs Codex without --no-daemon is named, with the fix.
@@ -9342,9 +9321,8 @@ async function cmdWorker(opts, rest) {
     const checked = checkedAgentHome(flagHome !== undefined ? runs : defaultAgent, requestedHome);
     if (checked.error) throw new CliError(`${flagHome !== undefined ? "--agent-home" : "worker.agentHome"}: ${checked.error}.`, 2);
     if (flagDir && checked.dir !== flagDir.dir) throw new CliError("--agent-home: its realpath changed.", 2);
-    const variable = agentHomeVar(runs);
-    if (runChangesAgentHome(agents[runs].run, variable)) {
-      throw new CliError(`--agent-home: the configured run can change or clear ${variable}.`, 2);
+    if (!plainAgentRun(plan.argv, runs)) {
+      throw new CliError(`--agent-home: the configured run must start ${runs} directly or through env with assignments that leave both vendor variables alone.`, 2);
     }
     selectedHome = checked;
   }
@@ -9507,7 +9485,7 @@ async function cmdWorker(opts, rest) {
     const args = workerArgs({ botId: bot.id, branch: place.branch, role, name, cwd: place.worktree, parent: me.address, space,
       agent: plan.agent, model: plan.model, effort: plan.effort, agyMode: plan.agyMode, argv: workerArgv, session, task: prompt, template: plan.template,
       templateArgv,
-      login: selectedHome ? [...selectedHome.words, `HERDR_APP_HOME=${appHome()}`]
+      login: selectedHome ? [...selectedHome.words, `${AGENT_HOME_MARKER}=1`]
         : claudeLogin(templateArgv ?? plan.argv ?? [], warnings),
       path: runPath?.path ?? process.env.PATH, taskId, project: project.key, lead,
       agySettingsPath: agySettings && !templateArgv ? agySettings.path : null,
@@ -9540,7 +9518,7 @@ async function cmdWorker(opts, rest) {
   const terminal = started.address;
   // The ledger row first, as launchSeat writes its rows before anything waits on the window.
   const { pid, createdMs } = await launchOf(terminal);
-  const unlogged = await recordWorkerStart(startRow({ kind: "worker", terminal, pid, botId: bot.id, task: taskId, branch: place.branch,
+  const unlogged = appendLedger(startRow({ kind: "worker", terminal, pid, botId: bot.id, task: taskId, branch: place.branch,
     project: project.key, lead, worktree, base, created: place.created, agent: plan.agent, model: plan.model, effort: plan.effort,
     template: plan.template, role, swap, override, overrideRequested, core: await rowCore(), createdMs, squad: squadOf(project.file, bot.id),
     session, agentHome: selectedHome?.dir }));
@@ -10654,9 +10632,6 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     if (command === "main") checkMainArgs(rest, tokens);
     if (opts["worker-agent-home"] !== undefined && !["create", "edit"].includes(command)) {
       throw new CliError("--worker-agent-home goes with create or edit.", 2);
-    }
-    if (opts["linked-tree"] && (command !== "restart" || !opts.tree || !opts.force || opts.machine !== undefined)) {
-      throw new CliError("--linked-tree requires a delegated restart --tree --force.", 2);
     }
     if (NEEDS_BOT.has(command) && !rest[0] && !(command === "restart" && (opts.queued || opts["run-queued"] || opts.due))) throw new CliError(`${command} needs a bot (its id or name).`, 2);
     if (opts.machine !== undefined && !ON_MACHINE.has(command)) {

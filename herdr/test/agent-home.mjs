@@ -6,8 +6,8 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 import { agentHomeFor, agentHomeVar } from "../mods/am-sidebar/logins.js";
-import { checkBots, parseBots } from "../mods/am-sidebar/model.js";
-import { runChangesAgentHome } from "../mods/am-sidebar/models.js";
+import { applyBotEdit, checkBots, parseBots } from "../mods/am-sidebar/model.js";
+import { plainAgentRun } from "../mods/am-sidebar/models.js";
 import { readLedger, startRow } from "../mods/am-sidebar/workers.js";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
 
@@ -101,20 +101,43 @@ export function agentHomeTests(cli) {
     }
   });
 
-  test("the configured prefix checks nested env and leaves vendor arguments alone", () => {
-    const variable = "CODEX_HOME";
+  test("a selected home accepts only the vendor executable or a plain env prefix", () => {
     for (const argv of [
       ["env", "CODEX_HOME=/other", "codex"],
-      ["nice", "-n", "5", "/usr/bin/env", "--unset", variable, "codex"],
-      ["time", "--", "env", "-uCODEX_HOME", "codex"],
-      ["env", "--unset=CODEX_HOME", "codex"],
-      ["env", "--", "CODEX_HOME=/elsewhere", "codex"],
-      ...["-i", "--ignore-environment", "-", "-S", "--some-option"].map((word) => ["env", word, "codex"]),
-    ]) assert.equal(runChangesAgentHome(argv, variable), true, JSON.stringify(argv));
+      ["/usr/bin/env", "CLAUDE_CONFIG_DIR=/other", "codex"],
+      ["pnpm", "exec", "env", "-u", "CODEX_HOME", "codex"],
+      ["node", "codex.js"], ["sh", "-c", "codex"],
+      ["/custom/env", "OTHER=1", "codex"], ["env", "OTHER=1"],
+      ...["-i", "--ignore-environment", "--", "-u", "-S"].map((word) => ["env", word, "codex"]),
+    ]) assert.equal(plainAgentRun(argv, "codex"), false, JSON.stringify(argv));
     for (const argv of [
-      ["nice", "env", "--unset", "OTHER", "env", "KEEP=1", "codex"],
-      ["node", "--require", "some-hook", "codex.js", "--never-executed", "CODEX_HOME=/somewhere"],
-    ]) assert.equal(runChangesAgentHome(argv, variable), false, JSON.stringify(argv));
+      ["/bin/codex", "--never-executed", "CODEX_HOME=/somewhere"],
+      ["env", "codex"], ["/usr/bin/env", "KEEP=1", "ALSO_KEEP=", "/bin/codex"],
+    ]) assert.equal(plainAgentRun(argv, "codex"), true, JSON.stringify(argv));
+    assert.equal(plainAgentRun(["claude"], "claude"), true);
+    assert.equal(plainAgentRun(["claude"], "codex"), false);
+  });
+
+  test("an unrelated form-shaped edit preserves the raw worker home for validation", () => {
+    for (const agentHome of ["", null, { path: "/private" }]) {
+      const raw = roster({ agentHome });
+      const [bot] = raw.bots;
+      const entry = { id: bot.id, kind: bot.kind, agent: "claude", name: "Renamed" };
+      const saved = applyBotEdit(raw, entry);
+      assert.deepEqual(saved.bots[0].worker.agentHome, agentHome);
+      assert.ok(checkBots(saved).some((line) => line.includes("worker.agentHome")));
+      assert.deepEqual(applyBotEdit(raw, { ...entry, worker: {} }).bots[0].worker, { agentHome });
+      assert.equal(applyBotEdit(raw, { ...entry, agent: "codex" }).bots[0].worker, undefined);
+    }
+  });
+
+  test("the public am entry point rejects --agent-home with help", async (t) => {
+    const root = scratchRoot(t, "agent-home-help-");
+    const am = new URL("../../am/bin/am.mjs", import.meta.url).pathname;
+    const env = { ...process.env, HOME: root, HERDR_APP_HOME: root, AUTOMAGIK_HERDR_TEST_ROOTS: root };
+    for (const args of [["help", "--agent-home", root], ["--help", `--agent-home=${root}`], ["-h", "--agent-home", root]]) {
+      await assert.rejects(cliExec(process.execPath, [am, ...args], { cwd: root, env }), { code: 2 });
+    }
   });
 
   test("worker ledger rows without a selected home read as null", () => {

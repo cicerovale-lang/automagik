@@ -8,7 +8,6 @@ import { join, dirname } from "node:path";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
 import { readJsonLines } from "./log-lines.mjs";
 import { attachPath } from "../mods/am-sidebar/attach.js";
-import { ledgerPath } from "../mods/am-sidebar/workers.js";
 
 const fixture = JSON.parse(readFileSync(new URL("./fixtures/start-programs.json", import.meta.url), "utf8"));
 const fake = new URL("./fake-hc.mjs", import.meta.url).pathname;
@@ -115,7 +114,7 @@ export function startProgramsTests(cli) {
       assert.equal(s.calls().some((c) => c[0] === "run" || c[0] === "kill"), false);
     });
   }
-  test("#1208 a linked --tree sends the home guard to the holding CLI", (t) => {
+  for (const mode of ["controller", "holding", "no-helpers"]) test(`#1208 linked --tree checks worker homes at ${mode}`, (t) => {
     const s = scene(t, cli, "hermes", true, true);
     s.live();
     const holdingApp = join(s.root, "holding-app"), worktree = join(s.root, "helper"), login = join(s.root, "private");
@@ -124,21 +123,57 @@ export function startProgramsTests(cli) {
     mkdirSync(login, { mode: 0o700 });
     writeFileSync(attachPath(holdingApp), "");
     writeFileSync(join(holdingApp, "programs.json"), JSON.stringify(fixture));
-    writeFileSync(ledgerPath(holdingApp), JSON.stringify({ event: "start", kind: "worker", terminal: "t2",
-      created_ms: 2, agent: "codex", worktree, agentHome: login }) + "\n");
     const state = JSON.parse(readFileSync(s.statePath, "utf8"));
-    state.terminals.push({ address: "vm/t2", name: "private-worker", created_ms: 2, state: "live", parent: "vm/t1", die_with_parent: true,
-      cwd: worktree, argv: ["codex"], foreground: { argv: ["codex"], cwd: worktree },
-      status: { state: "idle", app: "codex" }, labels: { "worker.of": id } });
+    if (mode !== "no-helpers") {
+      for (let n = 2; n <= 4; n += 1) {
+        state.terminals.push({ address: `vm/t${n}`, name: `worker-${n}`, created_ms: n, state: "live",
+          parent: `vm/t${n - 1}`, die_with_parent: true, cwd: worktree,
+          argv: n === 4 ? ["/usr/bin/env", `CODEX_HOME=${login}`, "AUTOMAGIK_AGENT_HOME=1", "codex"] : ["codex"],
+          foreground: { argv: ["codex"], cwd: worktree },
+          status: { state: "idle", app: "codex" }, labels: { "worker.of": id } });
+      }
+      // Simulate the last worker changing after the controller's observation. The holding CLI
+      // does its own walk and sees the marker on its local t4.
+      if (mode === "holding") state.getReply = { "vm/t4": { ...state.terminals.at(-1), argv: ["codex"] } };
+    }
     state.machines[0].env = { HOLDING_CLI: cli, HOLDING_APP: holdingApp };
     writeFileSync(s.statePath, JSON.stringify(state));
     const holding = new URL("./fake-holding-cli.mjs", import.meta.url).pathname;
-    exe(join(s.bin, "automagik-herdr"), `#!/bin/sh\nexec "${process.execPath}" "${holding}" "$@"\n`);
+    exe(join(s.bin, "automagik-herdr"), `#!/bin/sh\n`
+      + `for arg do [ "$arg" != --linked-tree ] || exit 2; done\n`
+      + `exec "${process.execPath}" "${holding}" "$@"\n`);
     const r = s.run(["restart", id, "--force", "--tree"]);
-    assert.equal(r.status, 1, r.stderr);
-    assert.match(r.stderr, /private-worker.*linked --tree/);
-    assert.equal(s.calls().some((call) => ["run", "kill"].includes(call[0])), false);
-    assert.deepEqual(JSON.parse(readFileSync(s.statePath, "utf8")).terminals.map((pane) => pane.state), ["live", "live"]);
+    const delegated = s.calls().filter((call) => call.includes("--tree"));
+    if (mode === "controller") {
+      assert.equal(delegated.length, 0);
+    } else {
+      assert.equal(delegated.length, 1);
+      assert.deepEqual(delegated[0].slice(delegated[0].indexOf("restart")), ["restart", id, "--project", s.project, "--tree", "--json", "--force"]);
+    }
+    const after = JSON.parse(readFileSync(s.statePath, "utf8"));
+    const holdingLog = `${s.statePath}.holding.log`;
+    if (mode === "no-helpers") {
+      assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(JSON.parse(r.stdout).helpers, []);
+      assert.deepEqual(after.terminals.map((pane) => pane.state), ["finished", "live"]);
+    } else {
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /worker-4 runs on its own login home; end it first or restart without --tree/);
+      const holdingCalls = mode === "holding" ? readJsonLines(holdingLog) : [];
+      assert.equal([...s.calls(), ...holdingCalls].some((call) => ["run", "kill"].includes(call[0])), false);
+      assert.deepEqual(after.terminals.map((pane) => pane.state), ["live", "live", "live", "live"]);
+    }
+  });
+
+  test("#1208 linked worker model edits ignore the controller's selected-home cache", (t) => {
+    const s = scene(t, cli, "codex", false, true);
+    const login = join(s.root, "private");
+    mkdirSync(login, { mode: 0o700 });
+    writeFileSync(join(login, "models_cache.json"), JSON.stringify({ models: [{ slug: "controller-only" }] }));
+    const r = s.run(["edit", id, "--worker-agent-home", login, "--worker-model", "holding-only"]);
+    assert.equal(r.status, 0, r.stderr);
+    const [saved] = JSON.parse(readFileSync(join(s.project, ".herdr/bots.json"), "utf8")).bots;
+    assert.deepEqual(saved.worker, { agentHome: login, model: "holding-only" });
   });
 
   for (const remote of [false, true]) test(`#1208 ${remote ? "linked" : "local"} restart --save drops the old default worker home`, (t) => {
