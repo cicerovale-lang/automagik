@@ -47,6 +47,20 @@ async function healthCode() {
   }
 }
 
+async function jsonHealth(container, healthy) {
+  const args = ['exec', container, '/nodejs/bin/node', '/opt/automagik/healthcheck.mjs', '--json']
+  let outcome
+  try { outcome = await docker(args) }
+  catch (error) {
+    if (healthy || error.code !== 1) throw error
+    outcome = error
+  }
+  const report = JSON.parse(outcome.stdout)
+  check((outcome.code ?? 0) === (healthy ? 0 : 1) && report.healthy === healthy,
+    'unexpected health check result')
+  return report
+}
+
 async function waitForFence() {
   const started = Date.now()
   while (Date.now() - started < START_TIMEOUT_MS) {
@@ -288,6 +302,31 @@ async function main() {
   await docker(['exec', gateName, '/nodejs/bin/node', '/opt/automagik/healthcheck.mjs'])
   say('gate: 401 healthy, separate store invisible to DSH, DSH mount read-only')
   say('claim: private 0600 files/socket, no code in logs or HTTP, local reset works in the image')
+  const view = `/data/${GATE_VIEW}`
+  const extra = `${view}/smoke-extra`
+  const execDsh = code => docker(['exec', name, '/nodejs/bin/node', '-e', code])
+  await execDsh(`require('node:fs').writeFileSync('${extra}', 'smoke', { mode: 0o600 })`)
+  const blockedDsh = await jsonHealth(name, false)
+  check(blockedDsh.reason === 'gate-view-tampered' && blockedDsh.fence.healthy,
+    'DSH did not report view tampering with its own fence intact')
+  // Let the gate's cached verdict expire before probing its listener.
+  await sleep(1100)
+  const blockedGate = await jsonHealth(gateName, false)
+  check(blockedGate.reason === 'gate-view-tampered' && blockedGate.gate.status === 503,
+    'gate did not report view tampering and refuse requests')
+  await execDsh(`
+    const assert = require('node:assert/strict')
+    const fs = require('node:fs')
+    assert.throws(() => fs.lstatSync('${view}/launch-url'), { code: 'ENOENT' })
+    assert.throws(() => fs.lstatSync('${view}/profile-state.json'), { code: 'ENOENT' })
+    fs.unlinkSync('${extra}')
+  `)
+  await jsonHealth(name, true)
+  await sleep(1100)
+  const recoveringGate = await jsonHealth(gateName, false)
+  check(recoveringGate.followsImage, 'gate did not see the restored profile state')
+  check(recoveringGate.gate.status === 503, 'gate answered before a new launch URL was published')
+  say('view tampering: both health checks fail and the gate refuses until the next DSH launch')
   await docker(['rm', '--force', gateName])
   await docker(['exec', name, '/nodejs/bin/node', '-e', `
     const fs = require('node:fs')

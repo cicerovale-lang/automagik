@@ -1,8 +1,7 @@
 // Only this module talks to DSH, always on loopback. No discovery or Cloud connection.
 import http from 'node:http'
-import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { LAUNCH_FILE } from './gate-view.mjs'
+import { LAUNCH_FILE, readViewFile } from './gate-view.mjs'
 import { GATE_VIEW_MOUNT, PORT } from './lib.mjs'
 
 export const DSH_HOST = '127.0.0.1'
@@ -31,7 +30,7 @@ export class DshCredentials {
     return this.pending
   }
   async mint() {
-    const launch = new URL(readFileSync(this.launchFile, 'utf8').trim())
+    const launch = new URL(readViewFile(this.launchFile).trim())
     const value = launch.searchParams.get('token')
     if (!value) throw new Error('DSH launch credential unavailable')
     // Never follow the launch URL's host or a redirect, even if the volume is tampered with.

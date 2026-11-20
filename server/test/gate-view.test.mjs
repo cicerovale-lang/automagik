@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import fs, {
   chmodSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync,
   statSync, symlinkSync, writeFileSync,
@@ -10,7 +11,10 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { recordLaunch } from '../entrypoint.mjs'
 import { DshCredentials } from '../gate-upstream.mjs'
-import { prepareGateView, writeProfileState } from '../gate-view.mjs'
+import {
+  createViewCheck, prepareGateView, readViewFile, viewProblem, writeProfileState,
+} from '../gate-view.mjs'
+import { createGate } from '../gate.mjs'
 import { healthReport } from '../healthcheck.mjs'
 import { GATE_VIEW, gateViewDir, profileDirOf } from '../lib.mjs'
 import { markSeed, PLUGINS, profileState } from '../profile-state.mjs'
@@ -354,4 +358,157 @@ test('a custom home that does not exist yet does not stop the view from being pr
   prepareGateView(view, home, { AUTOMAGIK_HOME: home, DSH_HOME: join(home, 'dsh'), secrets: join(home, 'secrets') })
   assert.equal(statSync(view).mode & 0o7777, 0o700)
   assert.deepEqual(readdirSync(view), [])
+})
+
+test('view validation allows only private publications and exact writer temp names', async t => {
+  const { viewDir, dshHome, state, profileFile } = fixture(t)
+  recordLaunch(dshHome, viewDir, 'http://ignored.invalid/?token=test')
+  writeProfileState(viewDir, state())
+  assert.equal(viewProblem(viewDir), null)
+
+  for (const [name, plant, reason] of [
+    ['extra', file => writeFileSync(file, 'test-only', { mode: 0o600 }), /unexpected entry/],
+    ['link', file => symlinkSync(profileFile, file), /unexpected entry/],
+    [`launch-url.${tempId}.tmp`, file => mkdirSync(file), /must be a regular file/],
+    [`profile-state.json.${tempId}.tmp`, file => symlinkSync(profileFile, file),
+      /must be a regular file/],
+    ['launch-url.12345678-abcd-5abc-8abc-123456789abc.tmp', file => writeFileSync(file, ''),
+      /unexpected entry/],
+  ]) {
+    await t.test(name, () => {
+      const file = join(viewDir, name)
+      plant(file)
+      const problem = viewProblem(viewDir)
+      assert.match(problem, reason)
+      assert.ok(problem.includes(JSON.stringify(name)))
+      assert.ok(!problem.includes('test-only'))
+      rmSync(file, { recursive: true })
+    })
+  }
+
+  chmodSync(profileFile, 0o640)
+  assert.match(viewProblem(viewDir), /mode 0600: "profile-state.json"$/)
+  chmodSync(profileFile, 0o600)
+  for (const name of ['launch-url', 'profile-state.json']) {
+    writeFileSync(join(viewDir, `${name}.${tempId}.tmp`), 'in flight', { mode: 0o600 })
+  }
+  assert.equal(viewProblem(viewDir), null)
+})
+
+test('DSH health withdraws only the publications and does not write a snapshot', async t => {
+  const { viewDir, dshHome, profileFile, report } = fixture(t)
+  const launch = 'http://ignored.invalid/?token=test'
+  const operatorFile = recordLaunch(dshHome, viewDir, launch)
+  assert.equal((await report()).healthy, true)
+
+  const extra = join(viewDir, 'extra-ada')
+  writeFileSync(extra, 'test-only', { mode: 0o600 })
+  const rename = t.mock.method(fs, 'renameSync')
+  const stderr = t.mock.method(process.stderr, 'write', () => true)
+  syncBuiltinESMExports()
+  t.after(() => {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+  })
+
+  const blocked = await report()
+  assert.equal(blocked.healthy, false)
+  assert.equal(blocked.reason, 'gate-view-tampered')
+  assert.deepEqual(blocked.fence, { healthy: true, status: 401 })
+  assert.equal(rename.mock.callCount(), 0)
+  assert.equal(stderr.mock.callCount(), 1)
+  assert.equal(stderr.mock.calls[0].arguments[0],
+    'automagik-web: unexpected entry in gate-view: "extra-ada"\n')
+  assert.deepEqual(readdirSync(viewDir), ['extra-ada'])
+  assert.equal(readFileSync(extra, 'utf8'), 'test-only')
+  assert.equal(readFileSync(operatorFile, 'utf8'), launch + '\n')
+
+  rmSync(extra)
+  assert.equal((await report()).healthy, true)
+  assert.deepEqual(readdirSync(viewDir), ['profile-state.json'])
+  assert.equal(rename.mock.calls[0].arguments[1], profileFile)
+})
+
+test('gate health checks every time and recovers when the extra entry is removed', async t => {
+  const { viewDir, report } = fixture(t)
+  assert.equal((await report()).healthy, true)
+  assert.equal((await report(gateEnv)).healthy, true)
+  const extra = join(viewDir, 'extra')
+  writeFileSync(extra, 'test-only')
+  const blocked = await report(gateEnv)
+  assert.equal(blocked.healthy, false)
+  assert.equal(blocked.reason, 'gate-view-tampered')
+  assert.equal(blocked.fence.healthy, true)
+  assert.ok(!JSON.stringify(blocked).includes(viewDir))
+  assert.ok(!JSON.stringify(blocked).includes('test-only'))
+  rmSync(extra)
+  assert.equal((await report(gateEnv)).healthy, true)
+})
+
+test('view reads refuse a symlink substituted after validation', t => {
+  const { viewDir, dshHome } = fixture(t)
+  const operatorFile = recordLaunch(dshHome, viewDir, 'http://ignored.invalid/?token=test')
+  assert.equal(viewProblem(viewDir), null)
+  const published = join(viewDir, 'launch-url')
+  rmSync(published)
+  symlinkSync(operatorFile, published)
+  assert.throws(() => readViewFile(published), { code: 'ELOOP' })
+})
+
+test('gate listeners share a one-second verdict for requests and upgrades', async t => {
+  const { viewDir, dshHome } = fixture(t)
+  const launch = 'http://ignored.invalid/?token=test'
+  recordLaunch(dshHome, viewDir, launch)
+  let now = 0
+  t.mock.method(performance, 'now', () => now)
+  const sessions = new EventEmitter()
+  sessions.authenticate = t.mock.fn()
+  const options = { origin: 'https://space.invalid', sessions, viewReady: createViewCheck(viewDir) }
+  const gate = createGate(options)
+  const bootstrap = createGate({ ...options, bootstrap: true })
+  t.after(() => Promise.all([gate.closeGate(), bootstrap.closeGate()]))
+  const req = { method: 'GET', url: '/', headers: { host: 'space.invalid' } }
+  const request = (listener, url = '/') => new Promise(resolve => {
+    let status
+    listener.emit('request', { ...req, url }, {
+      writeHead: value => { status = value },
+      end: body => resolve({ status, body }),
+    })
+  })
+  const socketRequest = (listener, event) => new Promise(resolve => {
+    const socket = new EventEmitter()
+    socket.destroy = () => socket.emit('close')
+    socket.end = (wire, done) => { done(); resolve(wire) }
+    listener.emit(event, { ...req, headers: { ...req.headers, origin: options.origin } }, socket)
+  })
+  const unavailable = { status: 503, body: '{"error":"Gate unavailable"}' }
+
+  assert.equal((await request(gate)).status, 401)
+  const extra = join(viewDir, 'extra')
+  writeFileSync(extra, 'test-only')
+  now = 999
+  assert.equal((await request(bootstrap)).status, 401)
+  now = 1000
+  assert.deepEqual(await request(gate, '/api/omni-mcp'), unavailable)
+  assert.deepEqual(await request(bootstrap, '/_gate/claim'), unavailable)
+  assert.equal(sessions.authenticate.mock.callCount(), 2)
+  for (const event of ['upgrade', 'connect']) {
+    const raw = await socketRequest(gate, event)
+    assert.match(raw, /^HTTP\/1.1 503 /)
+    assert.equal(raw.split('\r\n\r\n')[1], unavailable.body)
+  }
+
+  rmSync(extra)
+  now = 1999
+  assert.deepEqual(await request(gate), unavailable)
+  now = 2000
+  assert.equal((await request(bootstrap)).status, 401)
+  assert.match(await socketRequest(gate, 'upgrade'), /^HTTP\/1.1 401 /)
+
+  rmSync(join(viewDir, 'launch-url'))
+  now = 3000
+  assert.deepEqual(await request(gate), unavailable)
+  recordLaunch(dshHome, viewDir, launch)
+  now = 4000
+  assert.equal((await request(gate)).status, 401)
 })

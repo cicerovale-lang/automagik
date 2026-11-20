@@ -758,6 +758,17 @@ request because the gate fronts DSH's HTTPS traffic. With Access unset it connec
 fixed loopback DSH listener and never follows a launch file's destination or any upstream
 redirect. Tests use temporary stores and listeners.
 
+Both containers validate the view at every health check. Tampering makes both unhealthy with
+reason `gate-view-tampered`. DSH removes the published launch URL and profile summary and
+leaves the unexpected entry untouched. The gate answers requests and upgrades with `503` when
+its view check fails. It caches that verdict for one second. Once the unexpected entry is
+removed, the next DSH health check republishes the profile summary. The gate keeps returning
+`503` until DSH launches again and republishes the launch URL.
+
+An ACP vendor folder can already be a symlink into the view on a tampered volume. A vendor
+sign-in can write there between checks. Checking vendor folders before sign-in belongs in
+`acp-dsh`.
+
 Workspace HTTP requests and every WebSocket upgrade need a gate session; otherwise they get
 `401`, including static assets, `/connect` and unknown paths. Only the sign-in ceremonies below
 can create a session. The health probe

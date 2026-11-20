@@ -4,7 +4,9 @@
 import http from 'node:http'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { readProfileState, writeProfileState } from './gate-view.mjs'
+import {
+  readProfileState, unavailableProfileState, viewProblem, withdrawGateView, writeProfileState,
+} from './gate-view.mjs'
 import { GATE_VIEW_MOUNT, PORT, gateViewDir, profileDirOf } from './lib.mjs'
 import {
   installedPlugins, profileState, readJson, releaseVersion, validBuild,
@@ -30,10 +32,18 @@ export async function healthReport({
   root = ROOT, env = process.env, dshHome, viewDir, dshPort = PORT, probe = fenceProbe,
 } = {}) {
   const enabled = env.AUTOMAGIK_GATE_ENABLED === '1'
+  const view = viewDir ?? (enabled ? GATE_VIEW_MOUNT : undefined)
+  const problem = view && viewProblem(view)
   const build = readJson(join(root, 'versions.json'))
   let state
-  if (enabled) {
-    state = readProfileState(viewDir ?? GATE_VIEW_MOUNT, build)
+  if (problem) {
+    if (!enabled) {
+      withdrawGateView(view)
+      process.stderr.write(`automagik-web: ${problem}\n`)
+    }
+    state = unavailableProfileState('gate-view-tampered')
+  } else if (enabled) {
+    state = readProfileState(view, build)
   } else {
     const home = dshHome ?? env.DSH_HOME ?? '/data/dsh'
     const profile = profileDirOf(home)
@@ -42,9 +52,9 @@ export async function healthReport({
       state = { plugins: installedPlugins(profile), followsImage: false, ownerManaged: false,
         reason: 'invalid-profile-state' }
     }
-    if (viewDir) {
+    if (view) {
       // A failed publication leaves DSH's own health report intact.
-      try { writeProfileState(viewDir, state) } catch {}
+      try { writeProfileState(view, state) } catch {}
     }
   }
   const [dshStatus, gateStatus] = await Promise.all([probe(dshPort), enabled ? probe(Number(env.AUTOMAGIK_GATE_PORT || 3082)) : null])

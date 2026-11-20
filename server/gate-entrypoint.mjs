@@ -7,6 +7,8 @@ import { writeFileSync } from 'node:fs'
 import { controlServer } from './gate-control.mjs'
 import { readOwner, SessionStore } from './gate-store.mjs'
 import { DshCredentials, DSH_HOST } from './gate-upstream.mjs'
+import { createViewCheck } from './gate-view.mjs'
+import { GATE_VIEW_MOUNT } from './lib.mjs'
 
 let claimErrors, control, server, bootstrap
 try {
@@ -29,18 +31,23 @@ try {
   // No owner means no session. Unknown owner formats already stopped startup above.
   if (!cloud && !owner) sessions.revokeAll()
   const credentials = new DshCredentials()
+  const viewReady = createViewCheck(GATE_VIEW_MOUNT)
   const access = config ? new AccessSignIn(config, { ownerDir: dir }) : undefined
   const selfHosted = !claimMode ? undefined : new SelfHostedClaim({ dir, origin: origin.origin, sessions, claimMode: process.env.AUTOMAGIK_GATE_CLAIM ?? 'local' })
   const published = process.env.AUTOMAGIK_GATE_HOST || DSH_HOST
   if (claimMode && ![DSH_HOST, '0.0.0.0'].includes(published)) throw new claimErrors('AUTOMAGIK_GATE_HOST must be loopback or the IPv4 wildcard bind address')
-  server = createGate({ origin: origin.origin, sessions, credentials, access, cloud, selfHosted })
+  server = createGate({
+    origin: origin.origin, sessions, credentials, access, cloud, selfHosted, viewReady,
+  })
   if (selfHosted) {
     if (selfHosted.claimMode === 'local') {
       const bootstrapPort = Number(process.env.AUTOMAGIK_GATE_BOOTSTRAP_PORT || 3083)
       if (!Number.isInteger(bootstrapPort) || bootstrapPort < 1 || bootstrapPort > 65535 || [3081, port].includes(bootstrapPort)) {
         throw new claimErrors('AUTOMAGIK_GATE_BOOTSTRAP_PORT must be a separate valid port, never the DSH or main gate port')
       }
-      bootstrap = createGate({ origin: origin.origin, sessions, credentials, selfHosted, bootstrap: true })
+      bootstrap = createGate({
+        origin: origin.origin, sessions, credentials, selfHosted, bootstrap: true, viewReady,
+      })
       await new Promise((resolve, reject) => {
         bootstrap.once('error', reject)
         bootstrap.listen(bootstrapPort, DSH_HOST, resolve)

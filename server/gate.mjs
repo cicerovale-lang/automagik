@@ -8,6 +8,7 @@ import { samePerson, SIGNATURE_HEADER } from './gate-cloud.mjs'
 export const CLOUD_OPEN_PATH = '/_gate/cloud/open'
 export const CLOUD_RENEW_PATH = '/_gate/cloud/renew'
 export const CLOUD_REVOCATION_PATH = '/_gate/cloud/revocation'
+const VIEW_UNAVAILABLE = { error: 'Gate unavailable' }
 const MAX_OPEN_BODY = 4096
 const MAX_RENEW_BODY = 4096
 const MAX_REVOCATION_BODY = 4096
@@ -78,17 +79,22 @@ function readBody(req, limit, raw = false) {
     req.on('error', error => { clearTimeout(timer); reject(error) })
   })
 }
-function refuseSocket(socket, status = 401) {
+function refuseSocket(socket, status = 401, body = '') {
   const destroy = () => socket.destroy()
   const timer = setTimeout(destroy, 1000).unref()
   socket.once('error', destroy)
   socket.once('close', () => clearTimeout(timer))
   // An upgraded/CONNECT socket can stay half-open forever after FIN. Close its descriptor
   // once the rejection has flushed, with a deadline even if the peer does not read it.
-  socket.end(`HTTP/1.1 ${status} Refused\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`, destroy)
+  const headers = body ? 'Content-Type: application/json\r\nCache-Control: no-store\r\n' : ''
+  socket.end(`HTTP/1.1 ${status} Refused\r\nConnection: close\r\n` +
+    `${headers}Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`, destroy)
 }
 
-export function createGate({ origin: value, sessions, credentials, access, cloud, selfHosted, bootstrap = false, auditAccess = record => process.stderr.write(`${JSON.stringify(record)}\n`) }) {
+export function createGate({
+  origin: value, sessions, credentials, access, cloud, selfHosted, bootstrap = false, viewReady,
+  auditAccess = record => process.stderr.write(`${JSON.stringify(record)}\n`),
+}) {
   const origin = pinOrigin(value)
   const sockets = new Map()
   // Cloud mode: the rail posts a single-use open code here, as a form (OIDC's form_post shape).
@@ -222,6 +228,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
   // their own. A self-hosted instance has one human, so it keeps every session in scope.
   const mine = family => cloud ? other => samePerson(other.principal, family.principal) : undefined
   const server = http.createServer(async (req, res) => {
+    if (viewReady && !viewReady()) { answer(res, 503, VIEW_UNAVAILABLE); return }
     if (reservedPathAlias(req.url, origin)) { answer(res, 400, { error: 'Non-canonical gate path' }); return }
     if (cloud && req.url === CLOUD_REVOCATION_PATH) { await cloudRevoke(req, res); return }
     if (cloud && req.url === CLOUD_RENEW_PATH) { await cloudRenew(req, res); return }
@@ -298,9 +305,19 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
       req.pipe(proxy)
     } catch { if (!res.headersSent) answer(res, 502, { error: 'DSH unavailable' }); else res.destroy() }
   })
-  server.on('connect', (req, socket) => refuseSocket(socket, reservedPathAlias(req.url, origin) ? 400 : 401))
+  server.on('connect', (req, socket) => {
+    if (viewReady && !viewReady()) {
+      refuseSocket(socket, 503, JSON.stringify(VIEW_UNAVAILABLE))
+      return
+    }
+    refuseSocket(socket, reservedPathAlias(req.url, origin) ? 400 : 401)
+  })
   server.on('upgrade', async (req, socket, head) => {
     socket.on('error', () => {})
+    if (viewReady && !viewReady()) {
+      refuseSocket(socket, 503, JSON.stringify(VIEW_UNAVAILABLE))
+      return
+    }
     if (reservedPathAlias(req.url, origin)) { refuseSocket(socket, 400); return }
     const authorization = await authorize(req, true)
     const family = authorization?.family
